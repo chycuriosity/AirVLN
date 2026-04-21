@@ -18,6 +18,8 @@
 
 此外，你也可以参阅[本页面的中文版本](https://github.com/AirVLN/AirVLN/blob/main/README-ZH.md)
 
+> Cloud-model evaluation benchmark notes: this fork adds an OpenAI-compatible cloud VLM evaluation path. The detailed Chinese documentation is available in [README-ZH.md](README-ZH.md#云端大模型测评基准).
+
 ---
 
 ## 🌟 **Introduction**
