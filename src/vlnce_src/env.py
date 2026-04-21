@@ -289,7 +289,7 @@ class AirVLNENV:
         batch = []
 
         while True:
-            if self.index_data >= len(self.data)-1:
+            if self.index_data >= len(self.data):
                 random.shuffle(self.data)
                 logger.warning('random shuffle data')
                 if self.dataset_group_by_scene:
@@ -748,4 +748,3 @@ class AirVLNENV:
     def _update_StepsTaken(self):
         for i, state in enumerate(self.sim_states):
             self.sim_states[i].StepsTaken['_metric'] = self.sim_states[i].step
-

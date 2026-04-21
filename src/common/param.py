@@ -55,6 +55,18 @@ class Param:
         self.parser.add_argument("--EVAL_NUM", type=int, default=-1)
         self.parser.add_argument('--EVAL_GENERATE_VIDEO', action="store_true")
 
+        self.parser.add_argument('--cloud_model', type=str, default="qwen3.5-flash")
+        self.parser.add_argument('--cloud_base_url', type=str, default="https://dashscope.aliyuncs.com/compatible-mode/v1")
+        self.parser.add_argument('--cloud_api_key_env', type=str, default="DASHSCOPE_API_KEY")
+        self.parser.add_argument('--cloud_temperature', type=float, default=0.0)
+        self.parser.add_argument('--cloud_max_tokens', type=int, default=64)
+        self.parser.add_argument('--cloud_timeout', type=float, default=60.0)
+        self.parser.add_argument('--cloud_max_retries', type=int, default=3)
+        self.parser.add_argument('--cloud_fallback_action', type=str, default="STOP")
+        self.parser.add_argument('--cloud_no_rgb', action="store_true")
+        self.parser.add_argument('--cloud_use_depth_summary', action="store_true")
+        self.parser.add_argument('--cloud_save_prompts', action="store_true")
+
         self.parser.add_argument('--rgb_encoder_use_place365', action="store_true")
         self.parser.add_argument('--tokenizer_use_bert', action="store_true")
 
@@ -104,4 +116,3 @@ args.vocab_size = 10038
 default_config = CN.clone()
 default_config.make_dir_time = args.make_dir_time
 default_config.freeze()
-

@@ -1,0 +1,283 @@
+import base64
+import io
+import json
+import os
+import re
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+from PIL import Image
+
+from airsim_plugin.airsim_settings import AirsimActions
+
+
+ACTION_ID_TO_NAME = {
+    AirsimActions.STOP: "STOP",
+    AirsimActions.MOVE_FORWARD: "MOVE_FORWARD",
+    AirsimActions.TURN_LEFT: "TURN_LEFT",
+    AirsimActions.TURN_RIGHT: "TURN_RIGHT",
+    AirsimActions.GO_UP: "GO_UP",
+    AirsimActions.GO_DOWN: "GO_DOWN",
+    AirsimActions.MOVE_LEFT: "MOVE_LEFT",
+    AirsimActions.MOVE_RIGHT: "MOVE_RIGHT",
+}
+ACTION_NAME_TO_ID = {name: action_id for action_id, name in ACTION_ID_TO_NAME.items()}
+
+
+class CloudActionClient:
+    def __init__(self, args, logger):
+        self.args = args
+        self.logger = logger
+        self.model = args.cloud_model
+        self.fallback_action = self._parse_fallback_action(args.cloud_fallback_action)
+        self.client = self._build_client()
+
+    def predict_action(
+        self,
+        observation: Dict[str, Any],
+        episode: Dict[str, Any],
+        step: int,
+        history: List[Dict[str, Any]],
+        info: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[int, Dict[str, Any]]:
+        messages = self._build_messages(observation, episode, step, history)
+        started_at = time.time()
+        raw_response = ""
+        error = None
+
+        for attempt in range(int(self.args.cloud_max_retries)):
+            try:
+                completion = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=float(self.args.cloud_temperature),
+                    max_tokens=int(self.args.cloud_max_tokens),
+                    timeout=float(self.args.cloud_timeout),
+                    stream=False,
+                )
+                raw_response = completion.choices[0].message.content or ""
+                action = self.parse_action(raw_response)
+                if action is not None:
+                    return action, {
+                        "raw_response": raw_response,
+                        "latency_sec": time.time() - started_at,
+                        "attempts": attempt + 1,
+                        "error": None,
+                    }
+
+                error = "invalid action response"
+                messages = messages + [
+                    {
+                        "role": "user",
+                        "content": "Your previous response was invalid. Return only JSON like {\"action_id\": 1}.",
+                    }
+                ]
+            except Exception as exc:
+                error = repr(exc)
+                self.logger.error("cloud action request failed on attempt {}: {}".format(attempt + 1, error))
+
+        return self.fallback_action, {
+            "raw_response": raw_response,
+            "latency_sec": time.time() - started_at,
+            "attempts": int(self.args.cloud_max_retries),
+            "error": error,
+            "fallback_action": self.fallback_action,
+        }
+
+    def parse_action(self, text: str) -> Optional[int]:
+        parsed = self._extract_json(text)
+        if parsed is not None:
+            action = self._action_from_payload(parsed)
+            if action is not None:
+                return action
+
+        upper_text = text.upper()
+        for name, action_id in ACTION_NAME_TO_ID.items():
+            if name in upper_text:
+                return action_id
+
+        match = re.search(r"\b([0-7])\b", text)
+        if match:
+            return int(match.group(1))
+
+        return None
+
+    def _build_client(self):
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise ImportError(
+                "The openai package is required for cloud evaluation. Install it in the cxj conda environment."
+            ) from exc
+
+        api_key = os.getenv(self.args.cloud_api_key_env)
+        if not api_key:
+            raise EnvironmentError(
+                "Missing cloud API key. Set {} before running cloud evaluation.".format(self.args.cloud_api_key_env)
+            )
+
+        return OpenAI(
+            api_key=api_key,
+            base_url=self.args.cloud_base_url,
+        )
+
+    def _build_messages(
+        self,
+        observation: Dict[str, Any],
+        episode: Dict[str, Any],
+        step: int,
+        history: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        system_prompt = (
+            "You control a UAV in a vision-and-language navigation benchmark. "
+            "Choose exactly one discrete action for the next step. "
+            "Return only valid JSON with action_id and action_name. "
+            "Do not include explanations."
+        )
+        user_text = self._build_user_text(observation, episode, step, history)
+
+        if self.args.cloud_no_rgb or "rgb" not in observation or observation["rgb"] is None:
+            content = user_text
+        else:
+            content = [
+                {"type": "text", "text": user_text},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/jpeg;base64,{}".format(
+                            self._rgb_to_base64_jpeg(observation["rgb"])
+                        )
+                    },
+                },
+            ]
+
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": content},
+        ]
+
+    def _build_user_text(
+        self,
+        observation: Dict[str, Any],
+        episode: Dict[str, Any],
+        step: int,
+        history: List[Dict[str, Any]],
+    ) -> str:
+        instruction = episode["instruction"]["instruction_text"]
+        pose = observation.get("pose", [])
+        recent_history = history[-8:]
+
+        lines = [
+            "Navigation instruction:",
+            instruction,
+            "",
+            "Current step: {}".format(step),
+            "Current pose [x, y, z, qw, qx, qy, qz]: {}".format(self._format_array(pose)),
+            "",
+            "Available actions:",
+            "0 STOP: stop and finish the episode",
+            "1 MOVE_FORWARD: move forward 5 meters",
+            "2 TURN_LEFT: rotate left 15 degrees",
+            "3 TURN_RIGHT: rotate right 15 degrees",
+            "4 GO_UP: move upward 2 meters",
+            "5 GO_DOWN: move downward 2 meters",
+            "6 MOVE_LEFT: move left 5 meters",
+            "7 MOVE_RIGHT: move right 5 meters",
+            "",
+            "Recent action history:",
+            json.dumps(recent_history, ensure_ascii=True),
+        ]
+
+        if self.args.cloud_use_depth_summary and "depth" in observation and observation["depth"] is not None:
+            lines.extend(["", "Depth summary:", json.dumps(self._depth_summary(observation["depth"]), ensure_ascii=True)])
+
+        lines.extend([
+            "",
+            "Return exactly one JSON object, for example:",
+            "{\"action_id\": 1, \"action_name\": \"MOVE_FORWARD\"}",
+        ])
+        return "\n".join(lines)
+
+    def _parse_fallback_action(self, value: str) -> int:
+        normalized = str(value).strip().upper()
+        if normalized.isdigit() and int(normalized) in ACTION_ID_TO_NAME:
+            return int(normalized)
+        if normalized in ACTION_NAME_TO_ID:
+            return ACTION_NAME_TO_ID[normalized]
+        raise ValueError("Invalid --cloud_fallback_action: {}".format(value))
+
+    def _action_from_payload(self, payload: Dict[str, Any]) -> Optional[int]:
+        if "action_id" in payload:
+            try:
+                action_id = int(payload["action_id"])
+            except (TypeError, ValueError):
+                action_id = None
+            if action_id in ACTION_ID_TO_NAME:
+                return action_id
+
+        if "action_name" in payload:
+            action_name = str(payload["action_name"]).strip().upper()
+            if action_name in ACTION_NAME_TO_ID:
+                return ACTION_NAME_TO_ID[action_name]
+
+        return None
+
+    def _extract_json(self, text: str) -> Optional[Dict[str, Any]]:
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            stripped = re.sub(r"^```(?:json)?", "", stripped).strip()
+            stripped = re.sub(r"```$", "", stripped).strip()
+
+        candidates = [stripped]
+        match = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
+        if match:
+            candidates.append(match.group(0))
+
+        for candidate in candidates:
+            try:
+                payload = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                return payload
+        return None
+
+    def _rgb_to_base64_jpeg(self, rgb: np.ndarray) -> str:
+        image = np.asarray(rgb)
+        if image.dtype != np.uint8:
+            image = np.clip(image, 0, 255).astype(np.uint8)
+        if image.ndim == 2:
+            image = np.stack([image] * 3, axis=-1)
+        if image.shape[-1] == 4:
+            image = image[..., :3]
+
+        buffer = io.BytesIO()
+        Image.fromarray(image).save(buffer, format="JPEG", quality=85)
+        return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    def _depth_summary(self, depth: np.ndarray) -> Dict[str, float]:
+        depth_arr = np.asarray(depth, dtype=np.float32)
+        if depth_arr.ndim == 3:
+            depth_arr = depth_arr[..., 0]
+        height, width = depth_arr.shape[:2]
+        y1, y2 = height // 3, 2 * height // 3
+        x1, x2 = width // 3, 2 * width // 3
+
+        regions = {
+            "center_mean": depth_arr[y1:y2, x1:x2],
+            "left_mean": depth_arr[:, :x1],
+            "right_mean": depth_arr[:, x2:],
+            "top_mean": depth_arr[:y1, :],
+            "bottom_mean": depth_arr[y2:, :],
+        }
+        return {
+            name: float(np.nanmean(region)) if region.size else 0.0
+            for name, region in regions.items()
+        }
+
+    def _format_array(self, value: Any) -> List[float]:
+        try:
+            return [round(float(item), 4) for item in np.asarray(value).flatten().tolist()]
+        except Exception:
+            return []
