@@ -376,12 +376,23 @@ def eval_vlnce_cloud():
     logger.info(
         f"cloud_model={CLOUD_ARGS.cloud_model} enable_thinking={CLOUD_ARGS.enable_thinking}"
     )
+    output_root_dir = Path(args.project_prefix) / f"DATA/output/{args.name}/eval"
+    output_tb_dir = output_root_dir / f"TensorBoard/{args.make_dir_time}"
+    output_intermediate_every_dir = (
+        output_root_dir / f"intermediate_results_every/{args.make_dir_time}"
+    )
+    output_intermediate_dir = (
+        output_root_dir / f"intermediate_results/{args.make_dir_time}"
+    )
+    output_results_dir = output_root_dir / f"results/{args.make_dir_time}"
+    logger.info(f"Eval output root: {output_root_dir}")
+    logger.info(f"Eval TensorBoard dir: {output_tb_dir}")
+    logger.info(f"Eval per-episode dir: {output_intermediate_every_dir}")
+    logger.info(f"Eval intermediate dir: {output_intermediate_dir}")
+    logger.info(f"Eval aggregated results dir: {output_results_dir}")
 
     writer = TensorboardWriter(
-        str(
-            Path(args.project_prefix)
-            / f"DATA/output/{args.name}/eval/TensorBoard/{args.make_dir_time}"
-        ),
+        str(output_tb_dir),
         flush_secs=30,
     )
 
@@ -391,6 +402,9 @@ def eval_vlnce_cloud():
     if args.EVAL_CKPT_PATH_DIR is None or (not os.path.exists(args.EVAL_CKPT_PATH_DIR)):
         logger.warning(
             "EVAL_CKPT_PATH_DIR does not exist; run single-pass cloud eval with checkpoint_index=0"
+        )
+        logger.warning(
+            f"Output results will still be written under: {output_results_dir}"
         )
         _eval_cloud_checkpoint(
             writer=writer,

@@ -60,6 +60,8 @@ python -u ./src/vlnce_src/cloud_eval.py \
 
 `--EVAL_CKPT_PATH_DIR` is optional for cloud-only eval logic. If omitted (or path
 does not exist), runner executes one eval pass with `checkpoint_index=0`.
+When eval starts, it prints all output directories (TensorBoard, per-episode,
+intermediate, aggregated JSON) to logs.
 
 Output files are written under:
 
