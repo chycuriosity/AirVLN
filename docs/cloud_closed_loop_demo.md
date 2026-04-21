@@ -58,6 +58,9 @@ python -u ./src/vlnce_src/cloud_eval.py \
   --enable_thinking
 ```
 
+`--EVAL_CKPT_PATH_DIR` is optional for cloud-only eval logic. If omitted (or path
+does not exist), runner executes one eval pass with `checkpoint_index=0`.
+
 Output files are written under:
 
 - `DATA/output/{name}/eval/intermediate_results_every/{make_dir_time}/{checkpoint_index}/{episode_id}.json`

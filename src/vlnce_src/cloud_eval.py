@@ -388,8 +388,18 @@ def eval_vlnce_cloud():
     tok = initialize_tokenizer()
     client = build_openai_client()
 
-    assert os.path.exists(args.EVAL_CKPT_PATH_DIR), "The eval file/folder does not exist"
-    if os.path.isfile(args.EVAL_CKPT_PATH_DIR):
+    if args.EVAL_CKPT_PATH_DIR is None or (not os.path.exists(args.EVAL_CKPT_PATH_DIR)):
+        logger.warning(
+            "EVAL_CKPT_PATH_DIR does not exist; run single-pass cloud eval with checkpoint_index=0"
+        )
+        _eval_cloud_checkpoint(
+            writer=writer,
+            tok=tok,
+            client=client,
+            checkpoint_index=0,
+        )
+        logger.info("END evaluate")
+    elif os.path.isfile(args.EVAL_CKPT_PATH_DIR):
         proposed_index = get_checkpoint_id(args.EVAL_CKPT_PATH_DIR)
         ckpt_idx = proposed_index if proposed_index is not None else 100000
         _eval_cloud_checkpoint(
