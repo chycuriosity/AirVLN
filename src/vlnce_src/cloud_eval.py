@@ -28,6 +28,18 @@ def args_for_logging():
     return display_args
 
 
+def args_snapshot():
+    snapshot = {}
+    for key, value in vars(args).items():
+        if key == "cloud_api_key" and value:
+            snapshot[key] = "***"
+        elif isinstance(value, Path):
+            snapshot[key] = str(value)
+        else:
+            snapshot[key] = value
+    return snapshot
+
+
 def setup():
     seed = 100
     random.seed(seed)
@@ -123,6 +135,17 @@ def update_api_stats(api_stats, meta):
         api_stats["fallback_steps"] += 1
 
 
+def write_run_snapshot(results_dir):
+    write_json(
+        results_dir / "config_snapshot.json",
+        {
+            "args": args_snapshot(),
+            "prompt_version": PROMPT_VERSION,
+        },
+        indent=2,
+    )
+
+
 def cloud_eval():
     if args.batchSize != 1:
         logger.warning("Cloud evaluation is most stable with --batchSize 1; current batchSize is {}".format(args.batchSize))
@@ -151,6 +174,7 @@ def cloud_eval():
     if os.path.exists(str(result_file)):
         print("skipping -- evaluation exists.")
         return
+    write_run_snapshot(results_dir)
 
     stats_episodes = {}
     episodes_to_eval = len(train_env.data)
@@ -241,6 +265,7 @@ def cloud_eval():
                         "attempts": meta.get("attempts"),
                         "error": meta.get("error"),
                         "fallback_used": meta.get("fallback_used"),
+                        "memory": meta.get("memory"),
                         "prompt_version": meta.get("prompt_version"),
                         "prompt_hash": meta.get("prompt_hash"),
                     }

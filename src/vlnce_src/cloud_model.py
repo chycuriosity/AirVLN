@@ -62,10 +62,11 @@ class CloudActionClient:
                     stream=False,
                 )
                 raw_response = completion.choices[0].message.content or ""
-                action = self.parse_action(raw_response)
+                action, memory = self.parse_response(raw_response)
                 if action is not None:
                     return action, {
                         "raw_response": raw_response,
+                        "memory": memory,
                         "latency_sec": time.time() - started_at,
                         "attempts": attempt + 1,
                         "error": None,
@@ -78,7 +79,9 @@ class CloudActionClient:
                 messages = messages + [
                     {
                         "role": "user",
-                        "content": "Your previous response was invalid. Return only JSON like {\"action_id\": 1}.",
+                        "content": "Your previous response was invalid. Return only JSON like {}.".format(
+                            self._response_schema_example()
+                        ),
                     }
                 ]
             except Exception as exc:
@@ -87,6 +90,7 @@ class CloudActionClient:
 
         return self.fallback_action, {
             "raw_response": raw_response,
+            "memory": None,
             "latency_sec": time.time() - started_at,
             "attempts": int(self.args.cloud_max_retries),
             "error": error,
@@ -105,6 +109,7 @@ class CloudActionClient:
         output_dir: Path,
     ) -> Dict[str, str]:
         os.makedirs(str(output_dir), exist_ok=True)
+        messages = self._build_messages(observation, episode, step, history)
         prompt_text = self._build_user_text(observation, episode, step, history)
         saved = {}
 
@@ -123,7 +128,30 @@ class CloudActionClient:
             self._save_depth_image(observation["depth"], depth_path)
             saved["depth"] = str(depth_path)
 
+        if self.args.cloud_save_request_json:
+            request_path = output_dir / "step_{:04d}_request.json".format(step)
+            with open(str(request_path), "w", encoding="utf-8") as f:
+                json.dump(
+                    self._messages_for_snapshot(messages, saved),
+                    f,
+                    indent=2,
+                    ensure_ascii=True,
+                )
+            saved["request"] = str(request_path)
+
         return saved
+
+    def parse_response(self, text: str) -> Tuple[Optional[int], Optional[str]]:
+        parsed = self._extract_json(text)
+        if parsed is not None:
+            action = self._action_from_payload(parsed)
+            memory = parsed.get("memory")
+            if memory is not None:
+                memory = str(memory).strip()
+            if action is not None:
+                return action, memory
+
+        return self.parse_action(text), None
 
     def parse_action(self, text: str) -> Optional[int]:
         parsed = self._extract_json(text)
@@ -187,6 +215,7 @@ class CloudActionClient:
             "Choose exactly one discrete action for the next step. "
             "Use the RGB image for visual landmarks and the depth information to avoid collisions. "
             "Return only valid JSON with action_id and action_name. "
+            "If the user asks for a memory field, include memory in the same JSON object. "
             "Do not include explanations."
         )
         user_text = self._build_user_text(observation, episode, step, history)
@@ -254,6 +283,14 @@ class CloudActionClient:
             json.dumps(recent_history, ensure_ascii=True),
         ]
 
+        if self.args.cloud_use_memory:
+            lines.extend([
+                "",
+                "Navigation memory from previous steps:",
+                self._latest_memory(history),
+                "Update this memory to track completed landmarks, current subgoal, and next visual target.",
+            ])
+
         if self.args.cloud_use_pose:
             lines.extend([
                 "",
@@ -284,9 +321,14 @@ class CloudActionClient:
         lines.extend([
             "",
             "Return exactly one JSON object, for example:",
-            "{\"action_id\": 1, \"action_name\": \"MOVE_FORWARD\"}",
+            self._response_schema_example(),
         ])
         return "\n".join(lines)
+
+    def _response_schema_example(self) -> str:
+        if self.args.cloud_use_memory:
+            return "{\"action_id\": 1, \"action_name\": \"MOVE_FORWARD\", \"memory\": \"short navigation progress note\"}"
+        return "{\"action_id\": 1, \"action_name\": \"MOVE_FORWARD\"}"
 
     def _parse_fallback_action(self, value: str) -> int:
         normalized = str(value).strip().upper()
@@ -377,6 +419,7 @@ class CloudActionClient:
         height, width = depth_arr.shape[:2]
         y1, y2 = height // 3, 2 * height // 3
         x1, x2 = width // 3, 2 * width // 3
+        near_threshold = float(self.args.cloud_depth_near_threshold)
 
         regions = {
             "center_mean": depth_arr[y1:y2, x1:x2],
@@ -384,11 +427,44 @@ class CloudActionClient:
             "right_mean": depth_arr[:, x2:],
             "top_mean": depth_arr[:y1, :],
             "bottom_mean": depth_arr[y2:, :],
+            "front_center_min": depth_arr[y1:y2, x1:x2],
         }
-        return {
+        summary = {
             name: float(np.nanmean(region)) if region.size else 0.0
             for name, region in regions.items()
         }
+        if regions["front_center_min"].size:
+            summary["front_center_min"] = float(np.nanmin(regions["front_center_min"]))
+            summary["front_center_near_ratio"] = float(
+                np.mean(regions["front_center_min"] < near_threshold)
+            )
+        summary["near_obstacle_ratio"] = float(np.mean(depth_arr < near_threshold))
+        summary["near_threshold"] = near_threshold
+        summary["grid_mean"] = self._depth_grid(depth_arr, int(self.args.cloud_depth_grid_size), "mean")
+        summary["grid_min"] = self._depth_grid(depth_arr, int(self.args.cloud_depth_grid_size), "min")
+        return summary
+
+    def _depth_grid(self, depth_arr: np.ndarray, grid_size: int, mode: str) -> List[List[float]]:
+        grid_size = max(1, int(grid_size))
+        height, width = depth_arr.shape[:2]
+        grid = []
+        for row in range(grid_size):
+            row_values = []
+            y1 = row * height // grid_size
+            y2 = (row + 1) * height // grid_size
+            for col in range(grid_size):
+                x1 = col * width // grid_size
+                x2 = (col + 1) * width // grid_size
+                region = depth_arr[y1:y2, x1:x2]
+                if region.size == 0:
+                    value = 0.0
+                elif mode == "min":
+                    value = float(np.nanmin(region))
+                else:
+                    value = float(np.nanmean(region))
+                row_values.append(round(value, 6))
+            grid.append(row_values)
+        return grid
 
     def _depth_to_base64_png(self, depth: np.ndarray) -> str:
         colorized = self._prepare_depth_image(depth)
@@ -441,9 +517,17 @@ class CloudActionClient:
                     "step": item.get("step"),
                     "action_id": item.get("action_id"),
                     "action_name": item.get("action_name"),
+                    "memory": item.get("memory"),
                 }
             )
         return formatted
+
+    def _latest_memory(self, history: List[Dict[str, Any]]) -> str:
+        for item in reversed(history):
+            memory = item.get("memory")
+            if memory:
+                return str(memory)
+        return "No prior memory yet."
 
     def _hash_messages(self, messages: List[Dict[str, Any]]) -> str:
         payload = []
@@ -460,6 +544,30 @@ class CloudActionClient:
             payload.append({"role": message["role"], "content": content})
         encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+    def _messages_for_snapshot(self, messages: List[Dict[str, Any]], saved: Dict[str, str]) -> List[Dict[str, Any]]:
+        image_paths = []
+        if "rgb" in saved:
+            image_paths.append(saved["rgb"])
+        if "depth" in saved:
+            image_paths.append(saved["depth"])
+
+        image_index = 0
+        snapshot = []
+        for message in messages:
+            content = message["content"]
+            if isinstance(content, list):
+                snapshot_content = []
+                for item in content:
+                    if item.get("type") == "image_url":
+                        path = image_paths[image_index] if image_index < len(image_paths) else "<image>"
+                        snapshot_content.append({"type": "image_path", "path": path})
+                        image_index += 1
+                    else:
+                        snapshot_content.append(item)
+                content = snapshot_content
+            snapshot.append({"role": message["role"], "content": content})
+        return snapshot
 
     def _format_array(self, value: Any) -> List[float]:
         try:

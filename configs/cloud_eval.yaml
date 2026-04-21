@@ -49,8 +49,8 @@ cloud_verify_ssl: false
 # 采样温度；评测建议保持 0，减少随机性。
 cloud_temperature: 0.0
 
-# 单次动作回复的最大 token 数；动作 JSON 通常不需要很大。
-cloud_max_tokens: 64
+# 单次动作回复的最大 token 数；启用 memory 后需要略大一些。
+cloud_max_tokens: 128
 
 # 单次云端 API 请求超时时间，单位秒。
 cloud_timeout: 60.0
@@ -63,6 +63,9 @@ cloud_max_api_calls: -1
 
 # 重试后仍失败时执行的兜底动作，可用 STOP、MOVE_FORWARD 等动作名。
 cloud_fallback_action: STOP
+
+# 是否启用语义记忆。开启后模型每步需要返回 memory，下一步会带回 prompt。
+cloud_use_memory: true
 
 # 是否不发送 RGB 图像；false 表示发送 RGB，正式 VLN 评测建议保持 false。
 cloud_no_rgb: false
@@ -81,6 +84,12 @@ cloud_depth_mode: both
 cloud_depth_near_percentile: 2.0
 cloud_depth_far_percentile: 98.0
 
+# 深度摘要网格大小。3 表示输出 3x3 的 depth 均值和最小值网格。
+cloud_depth_grid_size: 3
+
+# 判定近处障碍的深度阈值，用于 near_obstacle_ratio 等摘要字段。
+cloud_depth_near_threshold: 0.05
+
 # 是否把深度图压缩成文本摘要发送给模型；cloud_depth_mode 为 both/summary 时也会发送。
 cloud_use_depth_summary: true
 
@@ -89,6 +98,9 @@ cloud_save_prompts: false
 
 # 是否保存每一步实际发给云模型的 RGB、深度图和 prompt，便于复盘；会增加磁盘占用。
 cloud_save_input_images: false
+
+# 是否在保存输入时额外保存去除 base64 的请求 JSON 快照。
+cloud_save_request_json: false
 
 # 是否跳过同一 name/model 下已经有单 episode 结果的样本，用于中断后续跑。
 cloud_resume: true
