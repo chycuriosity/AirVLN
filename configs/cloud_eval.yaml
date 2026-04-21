@@ -18,14 +18,14 @@ batchSize: 1
 # 评测数据集，可选 train、val_seen、val_unseen、test。
 EVAL_DATASET: val_unseen
 
-# 评测 episode 数量；-1 表示全量。
-EVAL_NUM: 10
+# 评测 episode 数量；-1 表示当前 split 全量。
+EVAL_NUM: -1
 
 # 单个 episode 最多执行多少步；全量正式评测通常可设为 500。
-maxAction: 100
+maxAction: 500
 
-# 是否生成视频；开启后会额外写视频文件，速度更慢。
-EVAL_GENERATE_VIDEO: True
+# 是否生成视频；全量 benchmark 建议关闭，调试少量样本时再开启。
+EVAL_GENERATE_VIDEO: False
 
 # 云端模型名称。
 cloud_model: Ali-dashscope/Qwen3.5-Plus

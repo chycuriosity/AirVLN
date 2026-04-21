@@ -267,6 +267,31 @@ cp configs/cloud_eval.yaml configs/cloud_eval.local.yaml
 | `cloud_max_api_calls` | 限制单次评测最多发起多少次云端动作请求，`-1` 表示不限。 |
 | `simulator_tool_port` | AirSim 仿真服务端口，默认 `30000`。 |
 
+### 数据集规模
+
+当前本地 `DATA/data/aerialvln/` 中各 split 的 episode 数量如下：
+
+| split | episode 数量 |
+| --- | ---: |
+| `train` | 16386 |
+| `val_seen` | 1818 |
+| `val_unseen` | 2310 |
+| `test` | 4830 |
+
+当前默认配置使用：
+
+```yaml
+EVAL_DATASET: val_unseen
+EVAL_NUM: -1
+```
+
+因此默认会对 `val_unseen` 的 2310 条 episode 做全量评测。如果要跑 `test` 全量，则改为：
+
+```yaml
+EVAL_DATASET: test
+EVAL_NUM: -1
+```
+
 ### 模型输入内容
 
 每一步云端模型会看到一个离散动作决策问题。根据配置不同，输入可能包括：
@@ -359,6 +384,20 @@ bash ./AirVLN/scripts/cloud_eval.sh
 2. 进入 `AirVLN` 目录。
 3. 优先读取 `configs/cloud_eval.local.yaml`，否则读取 `configs/cloud_eval.yaml`。
 4. 执行 `src/vlnce_src/cloud_eval.py`。
+
+当前默认配置已经调整为适合全量 benchmark：
+
+```yaml
+EVAL_NUM: -1
+maxAction: 500
+EVAL_GENERATE_VIDEO: False
+cloud_save_input_images: false
+cloud_save_request_json: false
+cloud_resume: true
+cloud_save_episode_list: true
+```
+
+这会保留必要指标、运行报告、失败分析、轨迹 JSON、云端日志和 episode list，但不保存视频和每步输入图像，避免全量评测时磁盘快速增长。
 
 ### 快速体检 Smoke Test
 
