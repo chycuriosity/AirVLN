@@ -117,5 +117,12 @@ cloud_smoke_test: false
 cloud_smoke_eval_num: 1
 cloud_smoke_max_action: 5
 
+# 固定 episode 子集路径。为空时按原项目逻辑选取；填写 JSON 后只评测其中的 episode_id。
+# 用于公平比较不同模型、prompt 或深度策略。
+cloud_episode_list_path:
+
+# 是否把本次实际评测的 episode_id 保存到 results 目录，方便后续复用同一子集。
+cloud_save_episode_list: true
+
 # 仿真服务端口；需要和 AirVLNSimulatorServerTool.py 的端口一致。
 simulator_tool_port: 30000

@@ -88,6 +88,21 @@ def initialize_env(tok):
     return AirVLNENV(batch_size=args.batchSize, split=split_map[args.EVAL_DATASET], tokenizer=tok)
 
 
+def initialize_eval_env(tok):
+    original_eval_num = args.EVAL_NUM
+    if args.cloud_episode_list_path:
+        args.EVAL_NUM = -1
+    try:
+        train_env = initialize_env(tok)
+    finally:
+        args.EVAL_NUM = original_eval_num
+
+    if args.cloud_episode_list_path:
+        episode_ids = load_episode_list(args.cloud_episode_list_path)
+        filter_env_episodes(train_env, episode_ids)
+    return train_env
+
+
 def safe_model_name(model_name):
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", model_name)
 
@@ -98,10 +113,105 @@ def write_json(path, payload, indent=None):
         json.dump(payload, f, indent=indent)
 
 
+def read_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def append_jsonl(path, payload):
     os.makedirs(str(Path(path).parent), exist_ok=True)
     with open(path, "a") as f:
         f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+
+def resolve_path(path_value):
+    if not path_value:
+        return None
+    path = Path(path_value).expanduser()
+    if not path.is_absolute():
+        path = Path(str(os.getcwd())).resolve() / path
+    return path
+
+
+def validate_config():
+    errors = []
+    warnings = []
+
+    if int(args.batchSize) != 1:
+        warnings.append("云端评测建议 batchSize=1，当前为 {}".format(args.batchSize))
+    if not args.cloud_model:
+        errors.append("cloud_model 不能为空")
+    if not args.cloud_base_url:
+        errors.append("cloud_base_url 不能为空")
+    if not args.cloud_api_key and not os.getenv(args.cloud_api_key_env):
+        errors.append("cloud_api_key 为空，且环境变量 {} 未设置".format(args.cloud_api_key_env))
+    if args.cloud_depth_mode not in {"none", "summary", "image", "both"}:
+        errors.append("cloud_depth_mode 必须是 none/summary/image/both")
+    if int(args.cloud_depth_grid_size) < 1:
+        errors.append("cloud_depth_grid_size 必须 >= 1")
+    if float(args.cloud_depth_near_percentile) >= float(args.cloud_depth_far_percentile):
+        errors.append("cloud_depth_near_percentile 必须小于 cloud_depth_far_percentile")
+    if int(args.maxAction) <= 0:
+        errors.append("maxAction 必须 > 0")
+    if int(args.EVAL_NUM) == 0:
+        errors.append("EVAL_NUM 不能为 0；使用 -1 表示全量")
+    if args.cloud_use_memory and int(args.cloud_max_tokens) < 96:
+        warnings.append("cloud_use_memory=true 时建议 cloud_max_tokens >= 96")
+    if not args.cloud_verify_ssl:
+        warnings.append("cloud_verify_ssl=false，当前会跳过 HTTPS 证书校验")
+
+    for key in ["cloud_prompt_system_path", "cloud_prompt_user_path", "cloud_episode_list_path"]:
+        path = resolve_path(getattr(args, key, None))
+        if path is not None and not path.exists():
+            errors.append("{} 指向的文件不存在: {}".format(key, path))
+
+    if errors:
+        for item in errors:
+            logger.error("config error: {}".format(item))
+        raise ValueError("Invalid cloud evaluation config: {}".format("; ".join(errors)))
+    for item in warnings:
+        logger.warning("config warning: {}".format(item))
+
+
+def load_episode_list(path_value):
+    path = resolve_path(path_value)
+    payload = read_json(path)
+    if isinstance(payload, dict):
+        episode_ids = payload.get("episode_ids", [])
+    else:
+        episode_ids = payload
+    if not isinstance(episode_ids, list) or not episode_ids:
+        raise ValueError("Episode list must be a non-empty JSON list or contain episode_ids: {}".format(path))
+    return [str(item) for item in episode_ids]
+
+
+def filter_env_episodes(train_env, episode_ids):
+    order = {episode_id: index for index, episode_id in enumerate(episode_ids)}
+    filtered = [item for item in train_env.data if str(item["episode_id"]) in order]
+    filtered.sort(key=lambda item: order[str(item["episode_id"])])
+    missing = [episode_id for episode_id in episode_ids if episode_id not in {str(item["episode_id"]) for item in filtered}]
+    if missing:
+        raise ValueError("Episode list contains {} ids not found in split {}. First missing id: {}".format(
+            len(missing),
+            train_env.split,
+            missing[0],
+        ))
+    train_env.data = filtered
+    train_env.index_data = 0
+    train_env.scenes = set(item["scene_id"] for item in train_env.data)
+    logger.info("Filtered evaluation data to {} fixed episode ids.".format(len(train_env.data)))
+
+
+def episode_list_payload(train_env, evaluated_ids=None):
+    ids = [str(item["episode_id"]) for item in train_env.data]
+    if evaluated_ids is not None:
+        ids = [str(item) for item in evaluated_ids]
+    return {
+        "split": train_env.split,
+        "eval_num": args.EVAL_NUM,
+        "episode_count": len(ids),
+        "episode_ids": ids,
+    }
 
 
 def log_episode_result(index, info):
@@ -365,6 +475,96 @@ def write_failure_analysis(path, stats_episodes, episode_action_summaries, api_s
         }
 
     write_json(path, payload, indent=2)
+    return payload
+
+
+def format_metric(value):
+    if isinstance(value, float):
+        return "{:.6f}".format(value)
+    return str(value)
+
+
+def write_markdown_report(path, aggregated_stats, api_stats, failure_payload, manifest_path, episode_list_path):
+    key_metrics = [
+        "success",
+        "ndtw",
+        "sdtw",
+        "oracle_success",
+        "distance_to_goal",
+        "path_length",
+        "steps_taken",
+        "cloud_requested_steps",
+        "cloud_fallback_steps",
+        "cloud_error_steps",
+        "cloud_latency_sec_avg",
+        "cloud_latency_sec_max",
+    ]
+    lines = [
+        "# Cloud Evaluation Report",
+        "",
+        "## Run",
+        "",
+        "- name: `{}`".format(args.name),
+        "- model: `{}`".format(args.cloud_model),
+        "- dataset: `{}`".format(args.EVAL_DATASET),
+        "- maxAction: `{}`".format(args.maxAction),
+        "- depth_mode: `{}`".format(args.cloud_depth_mode),
+        "- memory: `{}`".format(args.cloud_use_memory),
+        "- manifest: `{}`".format(manifest_path),
+        "- episode_list: `{}`".format(episode_list_path),
+        "",
+        "## Metrics",
+        "",
+        "| metric | value |",
+        "| --- | ---: |",
+    ]
+    for key in key_metrics:
+        if key in aggregated_stats:
+            lines.append("| {} | {} |".format(key, format_metric(aggregated_stats[key])))
+
+    failure_summary = failure_payload["summary"]
+    lines.extend([
+        "",
+        "## Failures",
+        "",
+        "- failed_episodes: `{}`".format(failure_summary.get("failed_episodes")),
+        "- collision_episodes: `{}`".format(failure_summary.get("collision_episodes")),
+        "- timeout_like_episodes: `{}`".format(failure_summary.get("timeout_like_episodes")),
+        "- fallback_steps: `{}`".format(api_stats.get("fallback_steps")),
+        "- error_steps: `{}`".format(api_stats.get("error_steps")),
+        "",
+        "## Behavior Labels",
+        "",
+    ])
+    behavior_labels = failure_summary.get("behavior_labels", {})
+    if behavior_labels:
+        for key, value in sorted(behavior_labels.items()):
+            lines.append("- {}: `{}`".format(key, value))
+    else:
+        lines.append("- none")
+
+    worst = sorted(
+        failure_payload["episodes"].items(),
+        key=lambda item: float(item[1].get("ndtw") or 0.0),
+    )[:10]
+    lines.extend([
+        "",
+        "## Lowest nDTW Episodes",
+        "",
+        "| episode_id | success | ndtw | reasons |",
+        "| --- | ---: | ---: | --- |",
+    ])
+    for episode_id, item in worst:
+        lines.append("| {} | {} | {} | {} |".format(
+            episode_id,
+            item.get("success"),
+            format_metric(float(item.get("ndtw") or 0.0)),
+            ", ".join(item.get("reasons") or []),
+        ))
+
+    os.makedirs(str(Path(path).parent), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def write_run_manifest(path, cloud_client, train_env, model_tag, run_started_at, run_finished_at, output_paths):
@@ -396,6 +596,7 @@ def write_run_manifest(path, cloud_client, train_env, model_tag, run_started_at,
 
 
 def cloud_eval():
+    validate_config()
     apply_smoke_overrides()
     if args.batchSize != 1:
         logger.warning("Cloud evaluation is most stable with --batchSize 1; current batchSize is {}".format(args.batchSize))
@@ -409,7 +610,7 @@ def cloud_eval():
     cloud_client = CloudActionClient(args, logger)
     model_tag = safe_model_name(args.cloud_model)
     tok = initialize_tokenizer()
-    train_env = initialize_env(tok)
+    train_env = initialize_eval_env(tok)
     completed_episode_ids = load_completed_episode_ids(model_tag)
     api_stats = {
         "requested_steps": 0,
@@ -426,9 +627,12 @@ def cloud_eval():
         print("skipping -- evaluation exists.")
         return
     write_run_snapshot(results_dir, cloud_client)
+    selected_episode_list_file = results_dir / "episode_list_selected.json"
+    write_json(selected_episode_list_file, episode_list_payload(train_env), indent=2)
 
     stats_episodes = {}
     episode_action_summaries = {}
+    evaluated_episode_ids = []
     episodes_to_eval = len(train_env.data)
     pbar = tqdm.tqdm(total=episodes_to_eval, dynamic_ncols=True)
 
@@ -574,6 +778,7 @@ def cloud_eval():
                 episode_id = str(train_env.batch[env_index]["episode_id"])
                 stats_episodes[episode_id] = infos[env_index]
                 episode_action_summaries[episode_id] = action_histories[env_index]
+                evaluated_episode_ids.append(episode_id)
 
                 every_results_dir = Path(args.project_prefix) / "DATA/output/{}/eval/intermediate_results_every/{}/cloud_{}".format(
                     args.name,
@@ -652,9 +857,12 @@ def cloud_eval():
         summary_csv_file = results_dir / "summary_cloud_{}_{}.csv".format(model_tag, train_env.split)
         failure_file = results_dir / "failure_analysis_cloud_{}_{}.json".format(model_tag, train_env.split)
         manifest_file = results_dir / "run_manifest.json"
+        report_file = results_dir / "report_cloud_{}_{}.md".format(model_tag, train_env.split)
+        evaluated_episode_list_file = results_dir / "episode_list_evaluated.json"
+        write_json(evaluated_episode_list_file, episode_list_payload(train_env, evaluated_episode_ids), indent=2)
         write_json(call_stats_file, api_stats, indent=4)
         write_summary_csv(summary_csv_file, aggregated_stats)
-        write_failure_analysis(failure_file, stats_episodes, episode_action_summaries, api_stats)
+        failure_payload = write_failure_analysis(failure_file, stats_episodes, episode_action_summaries, api_stats)
         write_run_manifest(
             manifest_file,
             cloud_client,
@@ -668,12 +876,23 @@ def cloud_eval():
                 "summary_csv": str(summary_csv_file),
                 "cloud_call_stats": str(call_stats_file),
                 "failure_analysis": str(failure_file),
+                "report": str(report_file),
+                "selected_episode_list": str(selected_episode_list_file),
+                "evaluated_episode_list": str(evaluated_episode_list_file),
                 "trajectories_dir": str(Path(args.project_prefix) / "DATA/output/{}/eval/trajectories/{}/cloud_{}".format(
                     args.name,
                     args.make_dir_time,
                     model_tag,
                 )),
             },
+        )
+        write_markdown_report(
+            report_file,
+            aggregated_stats,
+            api_stats,
+            failure_payload,
+            manifest_file,
+            evaluated_episode_list_file,
         )
 
         logger.info("Episodes evaluated: {}".format(num_episodes))

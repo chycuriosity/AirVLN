@@ -122,6 +122,8 @@ class Param:
         self.parser.add_argument('--cloud_smoke_test', action="store_true")
         self.parser.add_argument('--cloud_smoke_eval_num', type=int, default=1)
         self.parser.add_argument('--cloud_smoke_max_action', type=int, default=5)
+        self.parser.add_argument('--cloud_episode_list_path', type=str, default=None)
+        self.parser.add_argument('--cloud_save_episode_list', action="store_true")
 
         self.parser.add_argument('--rgb_encoder_use_place365', action="store_true")
         self.parser.add_argument('--tokenizer_use_bert', action="store_true")
