@@ -13,6 +13,10 @@ import numpy as np
 import torch
 import tqdm
 
+# Make repository root importable when running as:
+# python -u ./src/vlnce_src/cloud_eval.py ...
+sys.path.append(str(Path(str(os.getcwd())).resolve()))
+
 # Parse cloud-specific arguments first and leave the rest to src.common.param.
 _cloud_parser = argparse.ArgumentParser(add_help=False)
 _cloud_parser.add_argument("--cloud_model", default="qwen3.5-flash")
