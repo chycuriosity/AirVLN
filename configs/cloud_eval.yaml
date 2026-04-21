@@ -1,27 +1,68 @@
-# Cloud evaluation defaults.
-# Put your API key in cloud_api_key for one-file usage, or leave it empty and
-# export DASHSCOPE_API_KEY in the shell. Do not commit real API keys.
+# 云端大模型评测默认配置。
+# 这个文件会被 git 跟踪，请不要在这里提交真实 API key。
+# 如果需要把 key 写进文件，请复制为 configs/cloud_eval.local.yaml 后填写；
+# cloud_eval.sh 会优先读取 local 配置，且该文件已被 .gitignore 忽略。
 
+# 固定为 eval；云端评测只做测试，不训练本地模型。
 run_type: eval
+
+# 保持原项目的 TF 数据/评测流程。
 collect_type: TF
+
+# 本次实验名称；输出会写到 ../DATA/output/{name}/eval/。
 name: Cloud-Qwen35-Flash
+
+# 云端请求建议先用 1，稳定后再考虑并发。
 batchSize: 1
+
+# 评测数据集，可选 train、val_seen、val_unseen、test。
 EVAL_DATASET: val_unseen
+
+# 评测 episode 数量；-1 表示全量。
 EVAL_NUM: 1
-maxAction: 1
+
+# 单个 episode 最多执行多少步；全量正式评测通常可设为 500。
+maxAction: 100
+
+# 是否生成视频；开启后会额外写视频文件，速度更慢。
 EVAL_GENERATE_VIDEO: false
 
+# 云端模型名称。
 cloud_model: qwen3.5-flash
+
+# OpenAI compatible API 地址；当前默认使用阿里云 DashScope 兼容接口。
 cloud_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+
+# API key。请不要在这个被 git 跟踪的文件里填写真实 key。
+# 推荐在 configs/cloud_eval.local.yaml 中填写，或使用下面的环境变量。
 cloud_api_key: ""
+
+# 当 cloud_api_key 为空时，从这个环境变量读取 API key。
 cloud_api_key_env: DASHSCOPE_API_KEY
+
+# 采样温度；评测建议保持 0，减少随机性。
 cloud_temperature: 0.0
+
+# 单次动作回复的最大 token 数；动作 JSON 通常不需要很大。
 cloud_max_tokens: 64
+
+# 单次云端 API 请求超时时间，单位秒。
 cloud_timeout: 60.0
+
+# 单步动作请求失败或返回非法动作时的最大重试次数。
 cloud_max_retries: 3
+
+# 重试后仍失败时执行的兜底动作，可用 STOP、MOVE_FORWARD 等动作名。
 cloud_fallback_action: STOP
+
+# 是否不发送 RGB 图像；false 表示发送 RGB，正式 VLN 评测建议保持 false。
 cloud_no_rgb: false
+
+# 是否把深度图压缩成文本摘要发送给模型。
 cloud_use_depth_summary: true
+
+# 是否额外保存 prompt 调试信息；默认关闭以减少日志体积。
 cloud_save_prompts: false
 
+# 仿真服务端口；需要和 AirVLNSimulatorServerTool.py 的端口一致。
 simulator_tool_port: 30000
