@@ -1,9 +1,11 @@
 import base64
+import hashlib
 import io
 import json
 import os
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -23,6 +25,7 @@ ACTION_ID_TO_NAME = {
     AirsimActions.MOVE_RIGHT: "MOVE_RIGHT",
 }
 ACTION_NAME_TO_ID = {name: action_id for action_id, name in ACTION_ID_TO_NAME.items()}
+PROMPT_VERSION = "cloud-vln-depth-v2"
 
 
 class CloudActionClient:
@@ -43,6 +46,7 @@ class CloudActionClient:
         info: Optional[Dict[str, Any]] = None,
     ) -> Tuple[int, Dict[str, Any]]:
         messages = self._build_messages(observation, episode, step, history)
+        prompt_hash = self._hash_messages(messages)
         started_at = time.time()
         raw_response = ""
         error = None
@@ -65,6 +69,9 @@ class CloudActionClient:
                         "latency_sec": time.time() - started_at,
                         "attempts": attempt + 1,
                         "error": None,
+                        "fallback_used": False,
+                        "prompt_version": PROMPT_VERSION,
+                        "prompt_hash": prompt_hash,
                     }
 
                 error = "invalid action response"
@@ -84,7 +91,39 @@ class CloudActionClient:
             "attempts": int(self.args.cloud_max_retries),
             "error": error,
             "fallback_action": self.fallback_action,
+            "fallback_used": True,
+            "prompt_version": PROMPT_VERSION,
+            "prompt_hash": prompt_hash,
         }
+
+    def save_inputs(
+        self,
+        observation: Dict[str, Any],
+        episode: Dict[str, Any],
+        step: int,
+        history: List[Dict[str, Any]],
+        output_dir: Path,
+    ) -> Dict[str, str]:
+        os.makedirs(str(output_dir), exist_ok=True)
+        prompt_text = self._build_user_text(observation, episode, step, history)
+        saved = {}
+
+        prompt_path = output_dir / "step_{:04d}_prompt.txt".format(step)
+        with open(str(prompt_path), "w", encoding="utf-8") as f:
+            f.write(prompt_text)
+        saved["prompt"] = str(prompt_path)
+
+        if not self.args.cloud_no_rgb and "rgb" in observation and observation["rgb"] is not None:
+            rgb_path = output_dir / "step_{:04d}_rgb.jpg".format(step)
+            self._save_rgb_image(observation["rgb"], rgb_path)
+            saved["rgb"] = str(rgb_path)
+
+        if self._send_depth_image(observation):
+            depth_path = output_dir / "step_{:04d}_depth.png".format(step)
+            self._save_depth_image(observation["depth"], depth_path)
+            saved["depth"] = str(depth_path)
+
+        return saved
 
     def parse_action(self, text: str) -> Optional[int]:
         parsed = self._extract_json(text)
@@ -190,8 +229,6 @@ class CloudActionClient:
             instruction,
             "",
             "Current step: {}".format(step),
-            "Current pose [x, y, z, qw, qx, qy, qz]: {}".format(self._format_array(pose)),
-            "",
             "Available actions:",
             "0 STOP: stop and finish the episode",
             "1 MOVE_FORWARD: move forward 5 meters",
@@ -205,6 +242,12 @@ class CloudActionClient:
             "Recent action history:",
             json.dumps(recent_history, ensure_ascii=True),
         ]
+
+        if self.args.cloud_use_pose:
+            lines.extend([
+                "",
+                "Current pose [x, y, z, qw, qx, qy, qz]: {}".format(self._format_array(pose)),
+            ])
 
         if not self.args.cloud_no_rgb and "rgb" in observation and observation["rgb"] is not None:
             lines.extend([
@@ -297,6 +340,16 @@ class CloudActionClient:
         return None
 
     def _rgb_to_base64_jpeg(self, rgb: np.ndarray) -> str:
+        image = self._prepare_rgb_image(rgb)
+        buffer = io.BytesIO()
+        Image.fromarray(image).save(buffer, format="JPEG", quality=85)
+        return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    def _save_rgb_image(self, rgb: np.ndarray, path: Path) -> None:
+        image = self._prepare_rgb_image(rgb)
+        Image.fromarray(image).save(str(path), format="JPEG", quality=90)
+
+    def _prepare_rgb_image(self, rgb: np.ndarray) -> np.ndarray:
         image = np.asarray(rgb)
         if image.dtype != np.uint8:
             image = np.clip(image, 0, 255).astype(np.uint8)
@@ -304,10 +357,7 @@ class CloudActionClient:
             image = np.stack([image] * 3, axis=-1)
         if image.shape[-1] == 4:
             image = image[..., :3]
-
-        buffer = io.BytesIO()
-        Image.fromarray(image).save(buffer, format="JPEG", quality=85)
-        return base64.b64encode(buffer.getvalue()).decode("ascii")
+        return image
 
     def _depth_summary(self, depth: np.ndarray) -> Dict[str, float]:
         depth_arr = np.asarray(depth, dtype=np.float32)
@@ -330,11 +380,18 @@ class CloudActionClient:
         }
 
     def _depth_to_base64_png(self, depth: np.ndarray) -> str:
-        depth_arr = self._normalize_depth(depth)
-        colorized = self._colorize_depth(depth_arr)
+        colorized = self._prepare_depth_image(depth)
         buffer = io.BytesIO()
         Image.fromarray(colorized).save(buffer, format="PNG")
         return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    def _save_depth_image(self, depth: np.ndarray, path: Path) -> None:
+        colorized = self._prepare_depth_image(depth)
+        Image.fromarray(colorized).save(str(path), format="PNG")
+
+    def _prepare_depth_image(self, depth: np.ndarray) -> np.ndarray:
+        depth_arr = self._normalize_depth(depth)
+        return self._colorize_depth(depth_arr)
 
     def _normalize_depth(self, depth: np.ndarray) -> np.ndarray:
         depth_arr = np.asarray(depth, dtype=np.float32)
@@ -376,6 +433,22 @@ class CloudActionClient:
                 }
             )
         return formatted
+
+    def _hash_messages(self, messages: List[Dict[str, Any]]) -> str:
+        payload = []
+        for message in messages:
+            content = message["content"]
+            if isinstance(content, list):
+                normalized_content = []
+                for item in content:
+                    if item.get("type") == "image_url":
+                        normalized_content.append({"type": "image_url", "image_url": "<image>"})
+                    else:
+                        normalized_content.append(item)
+                content = normalized_content
+            payload.append({"role": message["role"], "content": content})
+        encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     def _format_array(self, value: Any) -> List[float]:
         try:

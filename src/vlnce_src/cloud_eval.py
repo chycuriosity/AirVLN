@@ -15,7 +15,7 @@ from Model.utils.common import append_text_to_image, generate_video, observation
 from Model.utils.tensorboard_utils import TensorboardWriter
 from airsim_plugin.airsim_settings import AirsimActions
 from src.common.param import args
-from src.vlnce_src.cloud_model import ACTION_ID_TO_NAME, CloudActionClient
+from src.vlnce_src.cloud_model import ACTION_ID_TO_NAME, PROMPT_VERSION, CloudActionClient
 from src.vlnce_src.env import AirVLNENV
 from src.vlnce_src.util import Tokenizer, read_vocab
 from utils.logger import logger
@@ -94,6 +94,35 @@ def log_episode_result(index, info):
     ))
 
 
+def load_completed_episode_ids(model_tag):
+    if not args.cloud_resume:
+        return set()
+
+    root = Path(args.project_prefix) / "DATA/output/{}/eval/intermediate_results_every".format(args.name)
+    completed = set()
+    if not root.exists():
+        return completed
+
+    for result_file in root.glob("*/cloud_{}/*.json".format(model_tag)):
+        completed.add(result_file.stem)
+
+    logger.info("Loaded {} completed episodes for resume.".format(len(completed)))
+    return completed
+
+
+def update_api_stats(api_stats, meta):
+    api_stats["requested_steps"] += 1
+    api_stats["attempts"] += int(meta.get("attempts") or 0)
+    latency = meta.get("latency_sec")
+    if latency is not None:
+        api_stats["latency_sec_total"] += float(latency)
+        api_stats["latency_sec_max"] = max(api_stats["latency_sec_max"], float(latency))
+    if meta.get("error"):
+        api_stats["error_steps"] += 1
+    if meta.get("fallback_used"):
+        api_stats["fallback_steps"] += 1
+
+
 def cloud_eval():
     if args.batchSize != 1:
         logger.warning("Cloud evaluation is most stable with --batchSize 1; current batchSize is {}".format(args.batchSize))
@@ -107,6 +136,15 @@ def cloud_eval():
     model_tag = safe_model_name(args.cloud_model)
     tok = initialize_tokenizer()
     train_env = initialize_env(tok)
+    completed_episode_ids = load_completed_episode_ids(model_tag)
+    api_stats = {
+        "requested_steps": 0,
+        "attempts": 0,
+        "error_steps": 0,
+        "fallback_steps": 0,
+        "latency_sec_total": 0.0,
+        "latency_sec_max": 0.0,
+    }
 
     results_dir = Path(args.project_prefix) / "DATA/output/{}/eval/results/{}".format(args.name, args.make_dir_time)
     result_file = results_dir / "stats_cloud_{}_{}.json".format(model_tag, train_env.split)
@@ -132,6 +170,12 @@ def cloud_eval():
                 logger.warning("train_env.batch is None, going to break and stop eval")
                 break
 
+            batch_episode_ids = [str(item["episode_id"]) for item in train_env.batch]
+            if args.cloud_resume and all(episode_id in completed_episode_ids for episode_id in batch_episode_ids):
+                logger.info("skip completed episodes: {}".format(batch_episode_ids))
+                pbar.update(len(batch_episode_ids))
+                continue
+
             rgb_frames = [[] for _ in range(train_env.batch_size)]
             skips = [False for _ in range(train_env.batch_size)]
             dones = [False for _ in range(train_env.batch_size)]
@@ -156,6 +200,27 @@ def cloud_eval():
                         actions.append(AirsimActions.STOP)
                         continue
 
+                    if args.cloud_max_api_calls != -1 and api_stats["requested_steps"] >= int(args.cloud_max_api_calls):
+                        logger.warning("Reached cloud_max_api_calls={}, stopping evaluation.".format(args.cloud_max_api_calls))
+                        dones = [True for _ in dones]
+                        actions.append(AirsimActions.STOP)
+                        break
+
+                    input_files = {}
+                    if args.cloud_save_input_images:
+                        input_dir = Path(args.project_prefix) / "DATA/output/{}/eval/cloud_inputs/{}/{}".format(
+                            args.name,
+                            args.make_dir_time,
+                            train_env.batch[env_index]["episode_id"],
+                        )
+                        input_files = cloud_client.save_inputs(
+                            observation=observations[env_index],
+                            episode=train_env.batch[env_index],
+                            step=step,
+                            history=action_histories[env_index],
+                            output_dir=input_dir,
+                        )
+
                     action, meta = cloud_client.predict_action(
                         observation=observations[env_index],
                         episode=train_env.batch[env_index],
@@ -163,6 +228,7 @@ def cloud_eval():
                         history=action_histories[env_index],
                         info=infos[env_index],
                     )
+                    update_api_stats(api_stats, meta)
                     actions.append(action)
 
                     action_record = {
@@ -174,6 +240,9 @@ def cloud_eval():
                         "latency_sec": meta.get("latency_sec"),
                         "attempts": meta.get("attempts"),
                         "error": meta.get("error"),
+                        "fallback_used": meta.get("fallback_used"),
+                        "prompt_version": meta.get("prompt_version"),
+                        "prompt_hash": meta.get("prompt_hash"),
                     }
                     action_histories[env_index].append(action_record)
 
@@ -182,9 +251,14 @@ def cloud_eval():
                         **action_record,
                         "raw_response": meta.get("raw_response"),
                     }
+                    if input_files:
+                        log_payload["input_files"] = input_files
                     if args.cloud_save_prompts:
                         log_payload["pose"] = observations[env_index].get("pose", []).tolist()
                     append_jsonl(log_dir / "{}.jsonl".format(train_env.batch[env_index]["episode_id"]), log_payload)
+
+                if len(actions) < train_env.batch_size:
+                    actions.extend([AirsimActions.STOP for _ in range(train_env.batch_size - len(actions))])
 
                 train_env.makeActions(actions)
 
@@ -260,12 +334,28 @@ def cloud_eval():
                 / num_episodes
             )
 
+        if api_stats["requested_steps"] > 0:
+            api_stats["latency_sec_avg"] = api_stats["latency_sec_total"] / api_stats["requested_steps"]
+        else:
+            api_stats["latency_sec_avg"] = 0.0
+        aggregated_stats["cloud_requested_steps"] = api_stats["requested_steps"]
+        aggregated_stats["cloud_api_attempts"] = api_stats["attempts"]
+        aggregated_stats["cloud_error_steps"] = api_stats["error_steps"]
+        aggregated_stats["cloud_fallback_steps"] = api_stats["fallback_steps"]
+        aggregated_stats["cloud_latency_sec_avg"] = api_stats["latency_sec_avg"]
+        aggregated_stats["cloud_latency_sec_max"] = api_stats["latency_sec_max"]
+        aggregated_stats["cloud_prompt_version"] = PROMPT_VERSION
+
         write_json(result_file, aggregated_stats, indent=4)
+        write_json(results_dir / "cloud_call_stats_{}_{}.json".format(model_tag, train_env.split), api_stats, indent=4)
 
         logger.info("Episodes evaluated: {}".format(num_episodes))
         for key, value in aggregated_stats.items():
-            logger.info("Average episode {}: {:.6f}".format(key, value))
-            writer.add_scalar("eval_{}_{}".format(train_env.split, key), value, 1)
+            if isinstance(value, (int, float)):
+                logger.info("Average episode {}: {:.6f}".format(key, value))
+                writer.add_scalar("eval_{}_{}".format(train_env.split, key), value, 1)
+            else:
+                logger.info("Average episode {}: {}".format(key, value))
     finally:
         try:
             pbar.close()

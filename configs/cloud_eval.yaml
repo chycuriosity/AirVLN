@@ -52,11 +52,17 @@ cloud_timeout: 60.0
 # 单步动作请求失败或返回非法动作时的最大重试次数。
 cloud_max_retries: 3
 
+# 单次评测最多允许多少个云端动作请求；-1 表示不限制。
+cloud_max_api_calls: -1
+
 # 重试后仍失败时执行的兜底动作，可用 STOP、MOVE_FORWARD 等动作名。
 cloud_fallback_action: STOP
 
 # 是否不发送 RGB 图像；false 表示发送 RGB，正式 VLN 评测建议保持 false。
 cloud_no_rgb: false
+
+# 是否把当前 pose 作为文本发给模型；开启后模型会看到 [x,y,z,qw,qx,qy,qz]。
+cloud_use_pose: true
 
 # 深度图发送模式：
 # none    不发送深度信息
@@ -74,6 +80,12 @@ cloud_use_depth_summary: true
 
 # 是否额外保存 prompt 调试信息；默认关闭以减少日志体积。
 cloud_save_prompts: false
+
+# 是否保存每一步实际发给云模型的 RGB、深度图和 prompt，便于复盘；会增加磁盘占用。
+cloud_save_input_images: false
+
+# 是否跳过同一 name/model 下已经有单 episode 结果的样本，用于中断后续跑。
+cloud_resume: true
 
 # 仿真服务端口；需要和 AirVLNSimulatorServerTool.py 的端口一致。
 simulator_tool_port: 30000
