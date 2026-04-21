@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -13,6 +14,10 @@ except ImportError as e:
     raise ImportError(
         "Please install openai first: pip install openai"
     ) from e
+
+# Make sure project root is importable when running as:
+# python -u ./scripts/cloud_closed_loop_demo.py
+sys.path.append(str(Path(str(os.getcwd())).resolve()))
 
 # Reuse project tokenizer/env stack
 from src.vlnce_src.env import AirVLNENV
