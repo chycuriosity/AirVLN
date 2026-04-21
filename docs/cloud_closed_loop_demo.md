@@ -73,6 +73,8 @@ Output files are written under:
 
 - Cloud runner uses retries (`--cloud_max_retries`, default 3) and falls back to `STOP` when cloud inference repeatedly fails.
 - For deterministic behavior, force cloud response to strict JSON action format: `{"action":"MOVE_FORWARD"}`.
+- Cloud eval disables `dataset_group_by_scene` internally to reduce repeated-scene launch failures at larger batch sizes.
+- If simulator scene opening is still unstable on your machine, set `--batchSize 1` first to validate full pipeline.
 
 ## Git rollback safety
 

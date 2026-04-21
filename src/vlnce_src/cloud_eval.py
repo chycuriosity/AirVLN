@@ -184,14 +184,38 @@ def cloud_infer_action_with_retry(
 
 
 def _build_eval_env(tok):
+    # Cloud inference latency is much higher than local policy forward.
+    # Disable scene-grouped batching to reduce repeated-scene launch pressure
+    # (e.g. [18,18,18,...]) that can make simulator scene opening unstable.
+    dataset_group_by_scene = False
     if args.EVAL_DATASET == "train":
-        return AirVLNENV(batch_size=args.batchSize, split="train", tokenizer=tok)
+        return AirVLNENV(
+            batch_size=args.batchSize,
+            split="train",
+            tokenizer=tok,
+            dataset_group_by_scene=dataset_group_by_scene,
+        )
     if args.EVAL_DATASET == "val_seen":
-        return AirVLNENV(batch_size=args.batchSize, split="val_seen", tokenizer=tok)
+        return AirVLNENV(
+            batch_size=args.batchSize,
+            split="val_seen",
+            tokenizer=tok,
+            dataset_group_by_scene=dataset_group_by_scene,
+        )
     if args.EVAL_DATASET == "val_unseen":
-        return AirVLNENV(batch_size=args.batchSize, split="val_unseen", tokenizer=tok)
+        return AirVLNENV(
+            batch_size=args.batchSize,
+            split="val_unseen",
+            tokenizer=tok,
+            dataset_group_by_scene=dataset_group_by_scene,
+        )
     if args.EVAL_DATASET == "test":
-        return AirVLNENV(batch_size=args.batchSize, split="test", tokenizer=tok)
+        return AirVLNENV(
+            batch_size=args.batchSize,
+            split="test",
+            tokenizer=tok,
+            dataset_group_by_scene=dataset_group_by_scene,
+        )
     raise KeyError("Unknown EVAL_DATASET")
 
 
@@ -375,6 +399,9 @@ def eval_vlnce_cloud():
     logger.info(args)
     logger.info(
         f"cloud_model={CLOUD_ARGS.cloud_model} enable_thinking={CLOUD_ARGS.enable_thinking}"
+    )
+    logger.warning(
+        "cloud_eval uses dataset_group_by_scene=False to reduce repeated-scene open failures"
     )
     output_root_dir = Path(args.project_prefix) / f"DATA/output/{args.name}/eval"
     output_tb_dir = output_root_dir / f"TensorBoard/{args.make_dir_time}"
