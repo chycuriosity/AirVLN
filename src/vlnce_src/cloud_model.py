@@ -159,9 +159,20 @@ class CloudActionClient:
                 )
             )
 
+        http_client = None
+        if self.args.cloud_disable_proxy or not self.args.cloud_verify_ssl:
+            import httpx
+
+            http_client = httpx.Client(
+                trust_env=not bool(self.args.cloud_disable_proxy),
+                verify=bool(self.args.cloud_verify_ssl),
+                timeout=float(self.args.cloud_timeout),
+            )
+
         return OpenAI(
             api_key=api_key,
             base_url=self.args.cloud_base_url,
+            http_client=http_client,
         )
 
     def _build_messages(

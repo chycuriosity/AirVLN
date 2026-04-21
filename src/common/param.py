@@ -95,6 +95,8 @@ class Param:
         self.parser.add_argument('--cloud_base_url', type=str, default="https://dashscope.aliyuncs.com/compatible-mode/v1")
         self.parser.add_argument('--cloud_api_key', type=str, default=None)
         self.parser.add_argument('--cloud_api_key_env', type=str, default="DASHSCOPE_API_KEY")
+        self.parser.add_argument('--cloud_disable_proxy', action="store_true")
+        self.parser.add_argument('--cloud_verify_ssl', type=lambda x: str(x).lower() in ["1", "true", "yes"], default=True)
         self.parser.add_argument('--cloud_temperature', type=float, default=0.0)
         self.parser.add_argument('--cloud_max_tokens', type=int, default=64)
         self.parser.add_argument('--cloud_timeout', type=float, default=60.0)
