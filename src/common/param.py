@@ -1,6 +1,7 @@
 import argparse
 import os
 import datetime
+import sys
 from pathlib import Path
 import yaml
 from utils.CN import CN
@@ -118,6 +119,9 @@ class Param:
         self.parser.add_argument('--cloud_save_input_images', action="store_true")
         self.parser.add_argument('--cloud_save_request_json', action="store_true")
         self.parser.add_argument('--cloud_resume', action="store_true")
+        self.parser.add_argument('--cloud_smoke_test', action="store_true")
+        self.parser.add_argument('--cloud_smoke_eval_num', type=int, default=1)
+        self.parser.add_argument('--cloud_smoke_max_action', type=int, default=5)
 
         self.parser.add_argument('--rgb_encoder_use_place365', action="store_true")
         self.parser.add_argument('--tokenizer_use_bert', action="store_true")
@@ -133,6 +137,12 @@ class Param:
         self.parser.add_argument('--action_feature', action="store_true", default=32)
 
         self.args = self.parser.parse_args()
+        explicit_cli_keys = set()
+        for action in self.parser._actions:
+            for option in action.option_strings:
+                if any(item == option or item.startswith("{}=".format(option)) for item in sys.argv[1:]):
+                    explicit_cli_keys.add(action.dest)
+        explicit_cli_values = vars(self.args).copy()
 
         if self.args.cloud_config:
             config_values = _load_config_file(self.args.cloud_config)
@@ -147,6 +157,8 @@ class Param:
                 )
             for key, value in config_values.items():
                 setattr(self.args, key, value)
+            for key in explicit_cli_keys:
+                setattr(self.args, key, explicit_cli_values[key])
 
 
 param = Param()

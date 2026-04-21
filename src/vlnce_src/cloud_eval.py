@@ -50,6 +50,22 @@ def setup():
     np.random.seed(seed)
 
 
+def apply_smoke_overrides():
+    if not args.cloud_smoke_test:
+        return
+    args.EVAL_NUM = int(args.cloud_smoke_eval_num)
+    args.maxAction = int(args.cloud_smoke_max_action)
+    args.EVAL_GENERATE_VIDEO = True
+    args.cloud_save_input_images = True
+    args.cloud_save_request_json = True
+    logger.warning(
+        "cloud_smoke_test enabled: EVAL_NUM={}, maxAction={}, save_input_images=True".format(
+            args.EVAL_NUM,
+            args.maxAction,
+        )
+    )
+
+
 def initialize_tokenizer():
     if args.tokenizer_use_bert:
         from transformers import BertTokenizer
@@ -139,6 +155,119 @@ def update_api_stats(api_stats, meta):
         api_stats["fallback_steps"] += 1
 
 
+def to_jsonable(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {key: to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [to_jsonable(item) for item in value]
+    return value
+
+
+def compact_info(info):
+    keep_keys = [
+        "episode_id",
+        "trajectory_id",
+        "done",
+        "is_collisioned",
+        "distance_to_goal",
+        "success",
+        "ndtw",
+        "sdtw",
+        "path_length",
+        "oracle_success",
+        "steps_taken",
+    ]
+    return {key: to_jsonable(info.get(key)) for key in keep_keys if key in info}
+
+
+def pose_list(observation):
+    pose = observation.get("pose", [])
+    try:
+        return [round(float(item), 4) for item in np.asarray(pose).flatten().tolist()]
+    except Exception:
+        return []
+
+
+def observation_summary(cloud_client, observation):
+    summary = {
+        "pose": pose_list(observation),
+        "has_rgb": bool("rgb" in observation and observation["rgb"] is not None),
+        "has_depth": bool("depth" in observation and observation["depth"] is not None),
+    }
+    if summary["has_depth"]:
+        try:
+            summary["depth_summary"] = to_jsonable(cloud_client._depth_summary(observation["depth"]))
+        except Exception as exc:
+            summary["depth_summary_error"] = repr(exc)
+    return summary
+
+
+def write_trajectory_trace(path, episode, actions, final_info):
+    payload = {
+        "episode_id": str(episode["episode_id"]),
+        "trajectory_id": episode.get("trajectory_id"),
+        "instruction": episode["instruction"]["instruction_text"],
+        "final_info": to_jsonable(final_info),
+        "steps": to_jsonable(actions),
+    }
+    write_json(path, payload, indent=2)
+
+
+def max_consecutive_action(actions):
+    max_run = 0
+    current_run = 0
+    previous = None
+    for item in actions:
+        action_id = item.get("action_id")
+        if action_id == previous:
+            current_run += 1
+        else:
+            current_run = 1
+            previous = action_id
+        max_run = max(max_run, current_run)
+    return max_run
+
+
+def behavior_diagnostics(info, actions):
+    action_ids = [item.get("action_id") for item in actions]
+    action_names = [item.get("action_name") for item in actions]
+    counts = {}
+    for name in action_names:
+        counts[name] = counts.get(name, 0) + 1
+
+    stop_steps = [item.get("step") for item in actions if item.get("action_id") == AirsimActions.STOP]
+    turn_ids = {AirsimActions.TURN_LEFT, AirsimActions.TURN_RIGHT}
+    turn_count = sum(1 for action_id in action_ids if action_id in turn_ids)
+    forward_count = sum(1 for action_id in action_ids if action_id == AirsimActions.MOVE_FORWARD)
+    side_count = sum(1 for action_id in action_ids if action_id in {AirsimActions.MOVE_LEFT, AirsimActions.MOVE_RIGHT})
+
+    labels = []
+    if stop_steps and stop_steps[0] <= 2 and float(info.get("success", 0.0)) < 1.0:
+        labels.append("early_stop")
+    if int(info.get("is_collisioned", 0)) == 1 and action_ids and action_ids[-1] == AirsimActions.MOVE_FORWARD:
+        labels.append("collision_after_forward")
+    if len(actions) >= 4 and max_consecutive_action(actions) >= 4:
+        labels.append("repeated_same_action")
+    if len(actions) >= 6 and turn_count / float(len(actions)) >= 0.7:
+        labels.append("turning_loop")
+    if len(actions) >= 6 and forward_count == 0 and float(info.get("success", 0.0)) < 1.0:
+        labels.append("no_forward_progress")
+
+    return {
+        "labels": labels,
+        "action_counts": counts,
+        "max_consecutive_same_action": max_consecutive_action(actions),
+        "stop_step": stop_steps[0] if stop_steps else None,
+        "turn_ratio": turn_count / float(len(actions)) if actions else 0.0,
+        "forward_ratio": forward_count / float(len(actions)) if actions else 0.0,
+        "side_move_ratio": side_count / float(len(actions)) if actions else 0.0,
+    }
+
+
 def get_git_commit():
     try:
         completed = subprocess.run(
@@ -183,12 +312,14 @@ def write_failure_analysis(path, stats_episodes, episode_action_summaries, api_s
             "timeout_like_episodes": 0,
             "fallback_steps": api_stats["fallback_steps"],
             "error_steps": api_stats["error_steps"],
+            "behavior_labels": {},
         },
         "episodes": {},
     }
 
     for episode_id, info in stats_episodes.items():
         actions = episode_action_summaries.get(str(episode_id), [])
+        behavior = behavior_diagnostics(info, actions)
         reasons = []
         if float(info.get("success", 0.0)) < 1.0:
             reasons.append("not_success")
@@ -203,9 +334,16 @@ def write_failure_analysis(path, stats_episodes, episode_action_summaries, api_s
             reasons.append("cloud_fallback_used")
         if float(info.get("ndtw", 0.0)) < 0.2:
             reasons.append("very_low_ndtw")
+        reasons.extend(behavior["labels"])
+
+        for label in behavior["labels"]:
+            payload["summary"]["behavior_labels"][label] = (
+                payload["summary"]["behavior_labels"].get(label, 0) + 1
+            )
 
         payload["episodes"][str(episode_id)] = {
             "reasons": reasons,
+            "behavior": behavior,
             "distance_to_goal": info.get("distance_to_goal"),
             "success": info.get("success"),
             "ndtw": info.get("ndtw"),
@@ -258,6 +396,7 @@ def write_run_manifest(path, cloud_client, train_env, model_tag, run_started_at,
 
 
 def cloud_eval():
+    apply_smoke_overrides()
     if args.batchSize != 1:
         logger.warning("Cloud evaluation is most stable with --batchSize 1; current batchSize is {}".format(args.batchSize))
 
@@ -372,6 +511,7 @@ def cloud_eval():
                         "episode_id": train_env.batch[env_index]["episode_id"],
                         "trajectory_id": train_env.batch[env_index]["trajectory_id"],
                         "step": step,
+                        "pre_observation": observation_summary(cloud_client, observations[env_index]),
                         "action_id": int(action),
                         "action_name": ACTION_ID_TO_NAME.get(int(action), "UNKNOWN"),
                         "latency_sec": meta.get("latency_sec"),
@@ -406,6 +546,14 @@ def cloud_eval():
                 logger.info("action: {}".format(actions))
 
                 for env_index in range(train_env.batch_size):
+                    if action_histories[env_index]:
+                        action_histories[env_index][-1]["done_after_action"] = bool(dones[env_index])
+                        action_histories[env_index][-1]["post_observation"] = observation_summary(
+                            cloud_client,
+                            observations[env_index],
+                        )
+                        action_histories[env_index][-1]["post_info"] = compact_info(infos[env_index])
+
                     if args.EVAL_GENERATE_VIDEO:
                         frame = observations_to_image(observations[env_index], infos[env_index])
                         frame = append_text_to_image(
@@ -448,6 +596,19 @@ def cloud_eval():
                     )
 
                 log_episode_result(env_index, infos[env_index])
+
+                trajectory_dir = Path(args.project_prefix) / "DATA/output/{}/eval/trajectories/{}/cloud_{}".format(
+                    args.name,
+                    args.make_dir_time,
+                    model_tag,
+                )
+                trajectory_file = trajectory_dir / "{}.json".format(train_env.batch[env_index]["episode_id"])
+                write_trajectory_trace(
+                    trajectory_file,
+                    train_env.batch[env_index],
+                    action_histories[env_index],
+                    infos[env_index],
+                )
 
         pbar.close()
 
@@ -507,6 +668,11 @@ def cloud_eval():
                 "summary_csv": str(summary_csv_file),
                 "cloud_call_stats": str(call_stats_file),
                 "failure_analysis": str(failure_file),
+                "trajectories_dir": str(Path(args.project_prefix) / "DATA/output/{}/eval/trajectories/{}/cloud_{}".format(
+                    args.name,
+                    args.make_dir_time,
+                    model_tag,
+                )),
             },
         )
 

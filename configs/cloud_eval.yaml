@@ -111,5 +111,11 @@ cloud_save_request_json: false
 # 是否跳过同一 name/model 下已经有单 episode 结果的样本，用于中断后续跑。
 cloud_resume: true
 
+# smoke test 相关参数。正常运行保持 cloud_smoke_test 为 false；
+# scripts/cloud_smoke_test.sh 会通过命令行临时开启，不需要改这个文件。
+cloud_smoke_test: false
+cloud_smoke_eval_num: 1
+cloud_smoke_max_action: 5
+
 # 仿真服务端口；需要和 AirVLNSimulatorServerTool.py 的端口一致。
 simulator_tool_port: 30000
