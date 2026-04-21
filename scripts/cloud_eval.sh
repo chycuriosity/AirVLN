@@ -4,13 +4,10 @@ conda activate cxj
 cd ./AirVLN
 echo $PWD
 
+CONFIG_PATH=${CLOUD_EVAL_CONFIG:-configs/cloud_eval.yaml}
+if [ -f configs/cloud_eval.local.yaml ]; then
+  CONFIG_PATH=configs/cloud_eval.local.yaml
+fi
+
 python -u ./src/vlnce_src/cloud_eval.py \
---run_type eval \
---collect_type TF \
---name Cloud-Qwen35-Flash \
---batchSize 1 \
---EVAL_DATASET val_unseen \
---EVAL_NUM 1 \
---maxAction 20 \
---cloud_model qwen3.5-flash \
---cloud_use_depth_summary
+--cloud_config "$CONFIG_PATH"

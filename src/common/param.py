@@ -2,7 +2,42 @@ import argparse
 import os
 import datetime
 from pathlib import Path
+import yaml
 from utils.CN import CN
+
+
+CONFIG_SECTION_PREFIXES = {
+    "cloud": "cloud_",
+    "eval": "",
+    "simulator": "",
+}
+
+
+def _flatten_config(config, parent_key=None):
+    flattened = {}
+    for key, value in config.items():
+        if isinstance(value, dict):
+            prefix = CONFIG_SECTION_PREFIXES.get(key, "{}_".format(key))
+            nested = _flatten_config(value, key)
+            for nested_key, nested_value in nested.items():
+                flattened["{}{}".format(prefix, nested_key)] = nested_value
+        else:
+            flattened[key] = value
+    return flattened
+
+
+def _load_config_file(config_path):
+    path = Path(config_path).expanduser()
+    if not path.is_absolute():
+        path = Path(str(os.getcwd())).resolve() / path
+
+    with open(str(path), "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+
+    if not isinstance(data, dict):
+        raise ValueError("Config file must contain a YAML mapping: {}".format(path))
+
+    return _flatten_config(data)
 
 
 class Param:
@@ -10,6 +45,7 @@ class Param:
         self.parser = argparse.ArgumentParser(description="")
 
         project_prefix = Path(str(os.getcwd())).parent.resolve()
+        self.parser.add_argument('--cloud_config', type=str, default=None, help="cloud evaluation YAML config path")
         self.parser.add_argument('--project_prefix', type=str, default=str(project_prefix), help="project path")
 
         self.parser.add_argument('--run_type', type=str, default="train", help="run_type in [collect, train, eval]")
@@ -57,6 +93,7 @@ class Param:
 
         self.parser.add_argument('--cloud_model', type=str, default="qwen3.5-flash")
         self.parser.add_argument('--cloud_base_url', type=str, default="https://dashscope.aliyuncs.com/compatible-mode/v1")
+        self.parser.add_argument('--cloud_api_key', type=str, default=None)
         self.parser.add_argument('--cloud_api_key_env', type=str, default="DASHSCOPE_API_KEY")
         self.parser.add_argument('--cloud_temperature', type=float, default=0.0)
         self.parser.add_argument('--cloud_max_tokens', type=int, default=64)
@@ -81,6 +118,20 @@ class Param:
         self.parser.add_argument('--action_feature', action="store_true", default=32)
 
         self.args = self.parser.parse_args()
+
+        if self.args.cloud_config:
+            config_values = _load_config_file(self.args.cloud_config)
+            valid_keys = {action.dest for action in self.parser._actions}
+            invalid_keys = sorted([key for key in config_values if key not in valid_keys])
+            if invalid_keys:
+                raise KeyError(
+                    "Unsupported config keys in {}: {}".format(
+                        self.args.cloud_config,
+                        ", ".join(invalid_keys),
+                    )
+                )
+            for key, value in config_values.items():
+                setattr(self.args, key, value)
 
 
 param = Param()

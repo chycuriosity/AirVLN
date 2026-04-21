@@ -111,10 +111,12 @@ class CloudActionClient:
                 "The openai package is required for cloud evaluation. Install it in the cxj conda environment."
             ) from exc
 
-        api_key = os.getenv(self.args.cloud_api_key_env)
+        api_key = self.args.cloud_api_key or os.getenv(self.args.cloud_api_key_env)
         if not api_key:
             raise EnvironmentError(
-                "Missing cloud API key. Set {} before running cloud evaluation.".format(self.args.cloud_api_key_env)
+                "Missing cloud API key. Set cloud_api_key in config or set {} before running cloud evaluation.".format(
+                    self.args.cloud_api_key_env
+                )
             )
 
         return OpenAI(

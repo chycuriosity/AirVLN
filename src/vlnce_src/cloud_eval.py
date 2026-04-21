@@ -21,6 +21,13 @@ from src.vlnce_src.util import Tokenizer, read_vocab
 from utils.logger import logger
 
 
+def args_for_logging():
+    display_args = vars(args).copy()
+    if display_args.get("cloud_api_key"):
+        display_args["cloud_api_key"] = "***"
+    return display_args
+
+
 def setup():
     seed = 100
     random.seed(seed)
@@ -91,7 +98,7 @@ def cloud_eval():
     if args.batchSize != 1:
         logger.warning("Cloud evaluation is most stable with --batchSize 1; current batchSize is {}".format(args.batchSize))
 
-    logger.info(args)
+    logger.info(args_for_logging())
     writer = TensorboardWriter(
         str(Path(args.project_prefix) / "DATA/output/{}/eval/TensorBoard/{}".format(args.name, args.make_dir_time)),
         flush_secs=30,

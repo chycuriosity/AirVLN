@@ -32,3 +32,6 @@ temp/*
 *.log
 
 tmp/
+
+# Local cloud API credentials
+configs/cloud_eval.local.yaml

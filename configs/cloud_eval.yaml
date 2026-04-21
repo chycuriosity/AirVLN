@@ -1,0 +1,27 @@
+# Cloud evaluation defaults.
+# Put your API key in cloud_api_key for one-file usage, or leave it empty and
+# export DASHSCOPE_API_KEY in the shell. Do not commit real API keys.
+
+run_type: eval
+collect_type: TF
+name: Cloud-Qwen35-Flash
+batchSize: 1
+EVAL_DATASET: val_unseen
+EVAL_NUM: 1
+maxAction: 1
+EVAL_GENERATE_VIDEO: false
+
+cloud_model: qwen3.5-flash
+cloud_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+cloud_api_key: ""
+cloud_api_key_env: DASHSCOPE_API_KEY
+cloud_temperature: 0.0
+cloud_max_tokens: 64
+cloud_timeout: 60.0
+cloud_max_retries: 3
+cloud_fallback_action: STOP
+cloud_no_rgb: false
+cloud_use_depth_summary: true
+cloud_save_prompts: false
+
+simulator_tool_port: 30000
