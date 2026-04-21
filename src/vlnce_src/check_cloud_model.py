@@ -136,7 +136,11 @@ def run_depth_reasoning_check(client):
     }
     action, meta = client.predict_action(observation, episode, step=0, history=[])
     return {
-        "ok": action not in {AirsimActions.MOVE_FORWARD, None},
+        "ok": (
+            action not in {AirsimActions.MOVE_FORWARD, None}
+            and not meta.get("fallback_used")
+            and not meta.get("error")
+        ),
         "latency_sec": meta.get("latency_sec"),
         "response": meta.get("raw_response"),
         "parsed_action_id": int(action),

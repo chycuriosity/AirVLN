@@ -281,14 +281,14 @@ cp configs/cloud_eval.yaml configs/cloud_eval.local.yaml
 当前默认配置使用：
 
 ```yaml
-EVAL_DATASET: val_unseen
+EVAL_DATASET: train
 EVAL_NUM: -1
 ```
 
-因此默认会对 `val_unseen` 的 2310 条 episode 做全量评测。如果要跑 `test` 全量，则改为：
+因此默认会对当前数据量最大的 `train` split 的 16386 条 episode 做全量评测。如果要跑 `val_unseen` 全量，则改为：
 
 ```yaml
-EVAL_DATASET: test
+EVAL_DATASET: val_unseen
 EVAL_NUM: -1
 ```
 
