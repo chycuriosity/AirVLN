@@ -464,6 +464,75 @@ cloud_episode_list_path: ../DATA/output/Cloud-Qwen35-Plus/eval/results/某次运
 | `model_checks/{time}/` | 云模型能力自检结果。 |
 | `TensorBoard/{time}/` | TensorBoard 指标。 |
 
+### 数据保存与开关
+
+云端评测会保存两类数据：
+
+1. **必要评测数据**：用于指标统计、复现、续跑和结果追踪，默认保存，目前不建议关闭。
+2. **调试复盘数据**：用于查看每一步输入、图像和请求内容，默认关闭或可配置，开启后会明显增加磁盘占用。
+
+#### 始终保存或基本始终保存的数据
+
+| 数据 | 位置 | 内容 | 是否可关闭 |
+| --- | --- | --- | --- |
+| 主日志 | `DATA/output/{name}/eval/logs/` | 配置、场景切换、每步动作、episode 结果、warning/error。 | 暂无配置开关。 |
+| 聚合结果 | `DATA/output/{name}/eval/results/{time}/` | 指标、配置快照、manifest、失败分析、Markdown 报告、episode list。 | 暂无配置开关。 |
+| 单 episode 结果 | `DATA/output/{name}/eval/intermediate_results_every/{time}/cloud_{model}/` | 每个 episode 的最终 `info`，也用于中断后续跑。 | 暂无配置开关。 |
+| 全量中间结果 | `DATA/output/{name}/eval/intermediate_results/{time}/` | 所有 episode 原始 `info` 汇总。 | 暂无配置开关。 |
+| 逐步轨迹 | `DATA/output/{name}/eval/trajectories/{time}/cloud_{model}/` | 每个 episode 的逐步动作、pose、深度摘要、memory、fallback/error。 | 暂无配置开关。 |
+| 云端逐步日志 | `DATA/output/{name}/eval/cloud_logs/{time}/` | 每步 raw response、动作解析、延迟、重试、fallback、错误。 | 暂无配置开关。 |
+| TensorBoard | `DATA/output/{name}/eval/TensorBoard/{time}/` | 聚合指标写入 TensorBoard。 | 暂无配置开关。 |
+| LMDB eval 缓存 | `DATA/img_features/eval/{name}/{split}_{time}/` | 原 AirVLN 环境在 eval 模式下创建的 LMDB 缓存。 | 暂无云端配置开关。 |
+
+这些数据是当前评测可追溯性的基础。即使关闭视频和调试输入，以上大部分文件仍会生成。
+
+#### 可配置保存的数据
+
+| 数据 | 位置 | 控制参数 | 说明 |
+| --- | --- | --- | --- |
+| 视频 | `DATA/output/{name}/eval/videos/{time}/` | `EVAL_GENERATE_VIDEO` | 每个 episode 一个 mp4。开启后便于人工复盘，但会增加耗时和磁盘占用。 |
+| 每步 prompt/RGB/深度图 | `DATA/output/{name}/eval/cloud_inputs/{time}/{episode_id}/` | `cloud_save_input_images` | 保存 `step_XXXX_prompt.txt`、`step_XXXX_rgb.jpg`、`step_XXXX_depth.png`。 |
+| 每步 request JSON | `DATA/output/{name}/eval/cloud_inputs/{time}/{episode_id}/` | `cloud_save_request_json` | 保存去掉 base64 图像内容后的 `step_XXXX_request.json`。通常需要配合 `cloud_save_input_images: true` 使用。 |
+| cloud log 额外调试字段 | `DATA/output/{name}/eval/cloud_logs/{time}/` | `cloud_save_prompts` | 当前主要用于额外写入 pose 等调试字段。注意：保存 prompt 文件的主开关是 `cloud_save_input_images`。 |
+| 续跑跳过 | `intermediate_results_every/` | `cloud_resume` | 不是保存开关，而是控制是否利用已有单 episode 结果跳过已完成样本。 |
+| 固定 episode list | `results/{time}/episode_list_*.json` | `cloud_save_episode_list` | 保存本次选中和实际完成的 episode id，方便后续公平比较。 |
+
+#### 推荐保存策略
+
+正式大规模 benchmark 建议减少调试文件：
+
+```yaml
+EVAL_GENERATE_VIDEO: False
+cloud_save_input_images: false
+cloud_save_request_json: false
+cloud_save_prompts: false
+cloud_resume: true
+cloud_save_episode_list: true
+```
+
+这种设置仍会保存必要指标、配置快照、manifest、失败分析、轨迹 JSON 和云端日志，但不会保存视频、每步图片和请求 JSON。
+
+调试少量失败样本时建议开启完整复盘材料：
+
+```yaml
+EVAL_NUM: 1
+maxAction: 20
+EVAL_GENERATE_VIDEO: True
+cloud_save_input_images: true
+cloud_save_request_json: true
+cloud_save_prompts: true
+```
+
+这种设置会额外保存视频、每步 prompt、RGB、伪彩色深度图和 request JSON，适合分析模型到底看到了什么、回复了什么，以及为什么选择某个动作。
+
+#### 只在单独工具运行时保存的数据
+
+| 工具 | 输出 | 说明 |
+| --- | --- | --- |
+| `check_cloud_model.py` | `DATA/output/{name}/eval/model_checks/{time}/cloud_model_check.json` | 只在运行模型能力自检或 smoke test 时生成。 |
+| `audit_cloud_alignment.py` | `DATA/output/cloud_alignment_audit.json` | 只在运行评测对齐审计脚本时生成。 |
+| `compare_cloud_runs.py` | 默认 `run_b/comparisons/` | 只在运行结果对比脚本时生成 JSON、CSV 和 Markdown 对比报告。 |
+
 ### results 目录中的关键文件
 
 一次正式评测结束后，`results/{time}/` 下通常包含：
