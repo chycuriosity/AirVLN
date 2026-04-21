@@ -1,15 +1,9 @@
-# Cloud LLM Closed-Loop Demo
+# Cloud LLM Closed-Loop / Eval
 
-This demo runs one `AirVLN` episode and replaces local policy inference with cloud LLM inference.
+This repository now has two cloud-inference entrypoints:
 
-## What it does
-
-1. Connects to simulator and resets one episode (`batch_size=1`).
-2. Reads simulator observation (`rgb/depth/pose/progress`).
-3. Builds observation summary JSON and sends it to OpenAI-compatible API.
-4. Parses cloud action and executes it in simulator.
-5. Repeats until done or `--max_steps`.
-6. Prints final evaluation metrics.
+1. `scripts/cloud_closed_loop_demo.py`: single-episode debug demo.
+2. `src/vlnce_src/cloud_eval.py`: eval-style runner (1:1 structure with `train.py --run_type eval`, but action selection is replaced by cloud LLM).
 
 ## Prerequisites
 
@@ -31,7 +25,7 @@ pip install openai
 export DASHSCOPE_API_KEY="sk-xxx"
 ```
 
-## Run demo
+## 1) Single-episode debug demo
 
 ```bash
 python -u ./scripts/cloud_closed_loop_demo.py \
@@ -46,20 +40,43 @@ python -u ./scripts/cloud_closed_loop_demo.py \
   --enable_thinking
 ```
 
-> Notes:
->
-> - `--run_type/--collect_type/--policy_type` are parsed by existing project args.
-> - Demo itself does not load local policy checkpoint.
-> - For deterministic output, ask cloud model to return strict JSON like `{"action":"MOVE_FORWARD"}`.
+## 2) Eval-style cloud runner (recommended)
+
+This keeps eval directory layout and metrics aggregation behavior aligned with `train.py` eval.
+
+```bash
+python -u ./src/vlnce_src/cloud_eval.py \
+  --run_type eval \
+  --policy_type seq2seq \
+  --collect_type TF \
+  --name cloud-eval \
+  --batchSize 8 \
+  --EVAL_CKPT_PATH_DIR ../DATA/output/AirVLN-seq2seq/train/checkpoint \
+  --EVAL_DATASET val_unseen \
+  --EVAL_NUM -1 \
+  --cloud_model qwen3.5-flash \
+  --enable_thinking
+```
+
+Output files are written under:
+
+- `DATA/output/{name}/eval/intermediate_results_every/{make_dir_time}/{checkpoint_index}/{episode_id}.json`
+- `DATA/output/{name}/eval/intermediate_results/{make_dir_time}/stats_ckpt_{checkpoint}_{split}.json`
+- `DATA/output/{name}/eval/results/{make_dir_time}/stats_ckpt_{checkpoint}_{split}.json`
+
+## Notes
+
+- Cloud runner uses retries (`--cloud_max_retries`, default 3) and falls back to `STOP` when cloud inference repeatedly fails.
+- For deterministic behavior, force cloud response to strict JSON action format: `{"action":"MOVE_FORWARD"}`.
 
 ## Git rollback safety
 
 Before experiments, create a branch and commit frequently:
 
 ```bash
-git checkout -b feat/cloud-closed-loop-demo
-git add scripts/cloud_closed_loop_demo.py docs/cloud_closed_loop_demo.md
-git commit -m "Add cloud LLM closed-loop demo for AirVLN"
+git checkout -b feat/cloud-eval
+git add src/vlnce_src/cloud_eval.py scripts/cloud_closed_loop_demo.py docs/cloud_closed_loop_demo.md
+git commit -m "Add eval-style cloud LLM runner"
 ```
 
 Rollback options:
