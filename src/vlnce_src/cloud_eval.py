@@ -15,7 +15,7 @@ import tqdm
 
 # Make repository root importable when running as:
 # python -u ./src/vlnce_src/cloud_eval.py ...
-sys.path.append(str(Path(str(os.getcwd())).resolve()))
+sys.path.insert(0, str(Path(str(os.getcwd())).resolve()))
 
 # Parse cloud-specific arguments first and leave the rest to src.common.param.
 _cloud_parser = argparse.ArgumentParser(add_help=False)
