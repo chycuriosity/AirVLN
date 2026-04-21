@@ -19,6 +19,15 @@ except ImportError as e:
 # python -u ./scripts/cloud_closed_loop_demo.py
 sys.path.append(str(Path(str(os.getcwd())).resolve()))
 
+# Parse demo-specific args first, then leave the rest for src.common.param parser.
+_demo_parser = argparse.ArgumentParser(add_help=False)
+_demo_parser.add_argument("--split", default="val_unseen", choices=["train", "val_seen", "val_unseen", "test"])
+_demo_parser.add_argument("--max_steps", type=int, default=30)
+_demo_parser.add_argument("--model", default="qwen3.5-flash")
+_demo_parser.add_argument("--enable_thinking", action="store_true")
+DEMO_ARGS, _remaining_argv = _demo_parser.parse_known_args()
+sys.argv = [sys.argv[0]] + _remaining_argv
+
 # Reuse project tokenizer/env stack
 from src.vlnce_src.env import AirVLNENV
 from src.vlnce_src.util import read_vocab, Tokenizer
@@ -141,16 +150,9 @@ def cloud_infer_action(
 
 
 def main():
-    parser = argparse.ArgumentParser("Cloud LLM closed-loop demo")
-    parser.add_argument("--split", default="val_unseen", choices=["train", "val_seen", "val_unseen", "test"])
-    parser.add_argument("--max_steps", type=int, default=30)
-    parser.add_argument("--model", default="qwen3.5-flash")
-    parser.add_argument("--enable_thinking", action="store_true")
-    demo_args = parser.parse_args()
-
     # force single-env demo for easier cloud-loop debugging
     tok = initialize_tokenizer()
-    env = AirVLNENV(batch_size=1, split=demo_args.split, tokenizer=tok)
+    env = AirVLNENV(batch_size=1, split=DEMO_ARGS.split, tokenizer=tok)
     client = build_openai_client()
 
     try:
@@ -163,17 +165,17 @@ def main():
         print("instruction:")
         print(env.batch[0]["instruction"]["instruction_text"])
 
-        for t in range(demo_args.max_steps):
+        for t in range(DEMO_ARGS.max_steps):
             if dones[0]:
                 break
 
             obs_summary = summarize_obs(observations[0])
             action_id, action_name, raw_text = cloud_infer_action(
                 client=client,
-                model_name=demo_args.model,
+                model_name=DEMO_ARGS.model,
                 instruction_text=env.batch[0]["instruction"]["instruction_text"],
                 obs_summary=obs_summary,
-                enable_thinking=demo_args.enable_thinking,
+                enable_thinking=DEMO_ARGS.enable_thinking,
             )
 
             print(f"[step={t}] cloud_action={action_name} ({action_id})")
