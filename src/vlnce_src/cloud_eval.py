@@ -1,9 +1,13 @@
 import gc
+import csv
+import datetime
 import json
 import os
 import random
 import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(str(os.getcwd())).resolve()))
@@ -74,7 +78,7 @@ def safe_model_name(model_name):
 
 def write_json(path, payload, indent=None):
     os.makedirs(str(Path(path).parent), exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=indent)
 
 
@@ -135,12 +139,119 @@ def update_api_stats(api_stats, meta):
         api_stats["fallback_steps"] += 1
 
 
-def write_run_snapshot(results_dir):
+def get_git_commit():
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(Path(__file__).resolve().parents[2]),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        return completed.stdout.strip()
+    except Exception:
+        return None
+
+
+def write_run_snapshot(results_dir, cloud_client):
     write_json(
         results_dir / "config_snapshot.json",
         {
             "args": args_snapshot(),
-            "prompt_version": PROMPT_VERSION,
+            "prompt": cloud_client.get_prompt_metadata(),
+        },
+        indent=2,
+    )
+
+
+def write_summary_csv(path, aggregated_stats):
+    os.makedirs(str(Path(path).parent), exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["metric", "value"])
+        for key in sorted(aggregated_stats.keys()):
+            writer.writerow([key, aggregated_stats[key]])
+
+
+def write_failure_analysis(path, stats_episodes, episode_action_summaries, api_stats):
+    payload = {
+        "summary": {
+            "episodes": len(stats_episodes),
+            "failed_episodes": 0,
+            "collision_episodes": 0,
+            "timeout_like_episodes": 0,
+            "fallback_steps": api_stats["fallback_steps"],
+            "error_steps": api_stats["error_steps"],
+        },
+        "episodes": {},
+    }
+
+    for episode_id, info in stats_episodes.items():
+        actions = episode_action_summaries.get(str(episode_id), [])
+        reasons = []
+        if float(info.get("success", 0.0)) < 1.0:
+            reasons.append("not_success")
+            payload["summary"]["failed_episodes"] += 1
+        if int(info.get("is_collisioned", 0)) == 1:
+            reasons.append("collision")
+            payload["summary"]["collision_episodes"] += 1
+        if int(info.get("steps_taken", 0)) >= int(args.maxAction):
+            reasons.append("max_action_reached")
+            payload["summary"]["timeout_like_episodes"] += 1
+        if any(item.get("fallback_used") for item in actions):
+            reasons.append("cloud_fallback_used")
+        if float(info.get("ndtw", 0.0)) < 0.2:
+            reasons.append("very_low_ndtw")
+
+        payload["episodes"][str(episode_id)] = {
+            "reasons": reasons,
+            "distance_to_goal": info.get("distance_to_goal"),
+            "success": info.get("success"),
+            "ndtw": info.get("ndtw"),
+            "sdtw": info.get("sdtw"),
+            "steps_taken": info.get("steps_taken"),
+            "path_length": info.get("path_length"),
+            "actions": [
+                {
+                    "step": item.get("step"),
+                    "action_id": item.get("action_id"),
+                    "action_name": item.get("action_name"),
+                    "fallback_used": item.get("fallback_used"),
+                    "error": item.get("error"),
+                    "latency_sec": item.get("latency_sec"),
+                    "memory": item.get("memory"),
+                }
+                for item in actions
+            ],
+        }
+
+    write_json(path, payload, indent=2)
+
+
+def write_run_manifest(path, cloud_client, train_env, model_tag, run_started_at, run_finished_at, output_paths):
+    write_json(
+        path,
+        {
+            "git_commit": get_git_commit(),
+            "start_time": datetime.datetime.fromtimestamp(run_started_at).isoformat(),
+            "end_time": datetime.datetime.fromtimestamp(run_finished_at).isoformat(),
+            "duration_sec": run_finished_at - run_started_at,
+            "config_path": args.cloud_config,
+            "name": args.name,
+            "model": args.cloud_model,
+            "model_tag": model_tag,
+            "base_url": args.cloud_base_url,
+            "split": train_env.split,
+            "eval_num": args.EVAL_NUM,
+            "max_action": args.maxAction,
+            "depth_mode": args.cloud_depth_mode,
+            "use_depth_summary": args.cloud_use_depth_summary,
+            "use_memory": args.cloud_use_memory,
+            "use_pose": args.cloud_use_pose,
+            "generate_video": args.EVAL_GENERATE_VIDEO,
+            "prompt": cloud_client.get_prompt_metadata(),
+            "outputs": output_paths,
         },
         indent=2,
     )
@@ -155,6 +266,7 @@ def cloud_eval():
         str(Path(args.project_prefix) / "DATA/output/{}/eval/TensorBoard/{}".format(args.name, args.make_dir_time)),
         flush_secs=30,
     )
+    run_started_at = time.time()
     cloud_client = CloudActionClient(args, logger)
     model_tag = safe_model_name(args.cloud_model)
     tok = initialize_tokenizer()
@@ -174,9 +286,10 @@ def cloud_eval():
     if os.path.exists(str(result_file)):
         print("skipping -- evaluation exists.")
         return
-    write_run_snapshot(results_dir)
+    write_run_snapshot(results_dir, cloud_client)
 
     stats_episodes = {}
+    episode_action_summaries = {}
     episodes_to_eval = len(train_env.data)
     pbar = tqdm.tqdm(total=episodes_to_eval, dynamic_ncols=True)
 
@@ -310,7 +423,9 @@ def cloud_eval():
                     break
 
             for env_index in range(int(train_env.batch_size)):
-                stats_episodes[str(train_env.batch[env_index]["episode_id"])] = infos[env_index]
+                episode_id = str(train_env.batch[env_index]["episode_id"])
+                stats_episodes[episode_id] = infos[env_index]
+                episode_action_summaries[episode_id] = action_histories[env_index]
 
                 every_results_dir = Path(args.project_prefix) / "DATA/output/{}/eval/intermediate_results_every/{}/cloud_{}".format(
                     args.name,
@@ -372,7 +487,28 @@ def cloud_eval():
         aggregated_stats["cloud_prompt_version"] = PROMPT_VERSION
 
         write_json(result_file, aggregated_stats, indent=4)
-        write_json(results_dir / "cloud_call_stats_{}_{}.json".format(model_tag, train_env.split), api_stats, indent=4)
+        call_stats_file = results_dir / "cloud_call_stats_{}_{}.json".format(model_tag, train_env.split)
+        summary_csv_file = results_dir / "summary_cloud_{}_{}.csv".format(model_tag, train_env.split)
+        failure_file = results_dir / "failure_analysis_cloud_{}_{}.json".format(model_tag, train_env.split)
+        manifest_file = results_dir / "run_manifest.json"
+        write_json(call_stats_file, api_stats, indent=4)
+        write_summary_csv(summary_csv_file, aggregated_stats)
+        write_failure_analysis(failure_file, stats_episodes, episode_action_summaries, api_stats)
+        write_run_manifest(
+            manifest_file,
+            cloud_client,
+            train_env,
+            model_tag,
+            run_started_at,
+            time.time(),
+            {
+                "results_dir": str(results_dir),
+                "stats": str(result_file),
+                "summary_csv": str(summary_csv_file),
+                "cloud_call_stats": str(call_stats_file),
+                "failure_analysis": str(failure_file),
+            },
+        )
 
         logger.info("Episodes evaluated: {}".format(num_episodes))
         for key, value in aggregated_stats.items():

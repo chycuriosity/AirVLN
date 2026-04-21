@@ -103,6 +103,8 @@ class Param:
         self.parser.add_argument('--cloud_max_retries', type=int, default=3)
         self.parser.add_argument('--cloud_max_api_calls', type=int, default=-1)
         self.parser.add_argument('--cloud_fallback_action', type=str, default="STOP")
+        self.parser.add_argument('--cloud_prompt_system_path', type=str, default=None)
+        self.parser.add_argument('--cloud_prompt_user_path', type=str, default=None)
         self.parser.add_argument('--cloud_use_memory', action="store_true")
         self.parser.add_argument('--cloud_no_rgb', action="store_true")
         self.parser.add_argument('--cloud_use_pose', action="store_true")

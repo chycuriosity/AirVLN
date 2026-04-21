@@ -28,6 +28,47 @@ ACTION_NAME_TO_ID = {name: action_id for action_id, name in ACTION_ID_TO_NAME.it
 PROMPT_VERSION = "cloud-vln-depth-v2"
 
 
+DEFAULT_SYSTEM_PROMPT = (
+    "You control a UAV in a vision-and-language navigation benchmark. "
+    "Choose exactly one discrete action for the next step. "
+    "Use the RGB image for visual landmarks and the depth information to avoid collisions. "
+    "Return only valid JSON with action_id and action_name. "
+    "If the user asks for a memory field, include memory in the same JSON object. "
+    "Do not include explanations."
+)
+
+
+DEFAULT_USER_PROMPT_TEMPLATE = """Navigation instruction:
+{instruction}
+
+Current step: {step}
+Available actions:
+0 STOP: stop and finish the episode
+1 MOVE_FORWARD: move forward 5 meters
+2 TURN_LEFT: rotate left 15 degrees
+3 TURN_RIGHT: rotate right 15 degrees
+4 GO_UP: move upward 2 meters
+5 GO_DOWN: move downward 2 meters
+6 MOVE_LEFT: move left 5 meters
+7 MOVE_RIGHT: move right 5 meters
+
+Recent action history:
+{action_history_json}
+{memory_block}
+{pose_block}
+{rgb_block}
+{depth_image_block}
+{depth_summary_block}
+
+Return exactly one JSON object, for example:
+{response_schema}"""
+
+
+class _SafeFormatDict(dict):
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
 class CloudActionClient:
     def __init__(self, args, logger):
         self.args = args
@@ -35,6 +76,14 @@ class CloudActionClient:
         self.model = args.cloud_model
         self.depth_mode = self._parse_depth_mode(args.cloud_depth_mode)
         self.fallback_action = self._parse_fallback_action(args.cloud_fallback_action)
+        self.system_prompt_template = self._load_prompt_template(
+            getattr(args, "cloud_prompt_system_path", None),
+            DEFAULT_SYSTEM_PROMPT,
+        )
+        self.user_prompt_template = self._load_prompt_template(
+            getattr(args, "cloud_prompt_user_path", None),
+            DEFAULT_USER_PROMPT_TEMPLATE,
+        )
         self.client = self._build_client()
 
     def predict_action(
@@ -210,13 +259,9 @@ class CloudActionClient:
         step: int,
         history: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        system_prompt = (
-            "You control a UAV in a vision-and-language navigation benchmark. "
-            "Choose exactly one discrete action for the next step. "
-            "Use the RGB image for visual landmarks and the depth information to avoid collisions. "
-            "Return only valid JSON with action_id and action_name. "
-            "If the user asks for a memory field, include memory in the same JSON object. "
-            "Do not include explanations."
+        system_prompt = self._format_template(
+            self.system_prompt_template,
+            self._build_prompt_context(observation, episode, step, history),
         )
         user_text = self._build_user_text(observation, episode, step, history)
 
@@ -260,51 +305,42 @@ class CloudActionClient:
         step: int,
         history: List[Dict[str, Any]],
     ) -> str:
+        return self._format_template(
+            self.user_prompt_template,
+            self._build_prompt_context(observation, episode, step, history),
+        )
+
+    def _build_prompt_context(
+        self,
+        observation: Dict[str, Any],
+        episode: Dict[str, Any],
+        step: int,
+        history: List[Dict[str, Any]],
+    ) -> Dict[str, str]:
         instruction = episode["instruction"]["instruction_text"]
         pose = observation.get("pose", [])
         recent_history = self._format_action_history(history)
 
-        lines = [
-            "Navigation instruction:",
-            instruction,
-            "",
-            "Current step: {}".format(step),
-            "Available actions:",
-            "0 STOP: stop and finish the episode",
-            "1 MOVE_FORWARD: move forward 5 meters",
-            "2 TURN_LEFT: rotate left 15 degrees",
-            "3 TURN_RIGHT: rotate right 15 degrees",
-            "4 GO_UP: move upward 2 meters",
-            "5 GO_DOWN: move downward 2 meters",
-            "6 MOVE_LEFT: move left 5 meters",
-            "7 MOVE_RIGHT: move right 5 meters",
-            "",
-            "Recent action history:",
-            json.dumps(recent_history, ensure_ascii=True),
-        ]
+        memory_block = ""
+        pose_block = ""
+        rgb_block = ""
+        depth_image_block = ""
+        depth_summary_block = ""
 
         if self.args.cloud_use_memory:
-            lines.extend([
-                "",
-                "Navigation memory from previous steps:",
+            memory_block = "\nNavigation memory from previous steps:\n{}\n{}".format(
                 self._latest_memory(history),
                 "Update this memory to track completed landmarks, current subgoal, and next visual target.",
-            ])
+            )
 
         if self.args.cloud_use_pose:
-            lines.extend([
-                "",
-                "Current pose [x, y, z, qw, qx, qy, qz]: {}".format(self._format_array(pose)),
-            ])
+            pose_block = "\nCurrent pose [x, y, z, qw, qx, qy, qz]: {}".format(self._format_array(pose))
 
         if not self.args.cloud_no_rgb and "rgb" in observation and observation["rgb"] is not None:
-            lines.extend([
-                "",
-                "Image 1 is the RGB observation from the UAV camera.",
-            ])
+            rgb_block = "\nImage 1 is the RGB observation from the UAV camera."
 
         if self._send_depth_image(observation):
-            lines.extend([
+            depth_image_block = "\n".join([
                 "",
                 "Image 2 is a colorized depth map generated from the UAV depth sensor.",
                 "In the depth map, red/yellow means close obstacles and blue means farther safer space.",
@@ -312,18 +348,51 @@ class CloudActionClient:
             ])
 
         if self._send_depth_summary(observation):
-            lines.extend([
-                "",
-                "Depth summary:",
-                json.dumps(self._depth_summary(observation["depth"]), ensure_ascii=True),
-            ])
+            depth_summary_block = "\nDepth summary:\n{}".format(
+                json.dumps(self._depth_summary(observation["depth"]), ensure_ascii=True)
+            )
 
-        lines.extend([
-            "",
-            "Return exactly one JSON object, for example:",
-            self._response_schema_example(),
-        ])
-        return "\n".join(lines)
+        return {
+            "instruction": instruction,
+            "step": str(step),
+            "action_history_json": json.dumps(recent_history, ensure_ascii=True),
+            "memory_block": memory_block,
+            "pose_block": pose_block,
+            "rgb_block": rgb_block,
+            "depth_image_block": depth_image_block,
+            "depth_summary_block": depth_summary_block,
+            "response_schema": self._response_schema_example(),
+        }
+
+    def _format_template(self, template: str, context: Dict[str, str]) -> str:
+        return template.format_map(_SafeFormatDict(context)).strip()
+
+    def get_prompt_metadata(self) -> Dict[str, Any]:
+        return {
+            "prompt_version": PROMPT_VERSION,
+            "system_prompt_path": self._prompt_path(getattr(self.args, "cloud_prompt_system_path", None)),
+            "user_prompt_path": self._prompt_path(getattr(self.args, "cloud_prompt_user_path", None)),
+            "system_prompt_sha256": self._hash_text(self.system_prompt_template),
+            "user_prompt_sha256": self._hash_text(self.user_prompt_template),
+        }
+
+    def _load_prompt_template(self, path_value: Optional[str], default: str) -> str:
+        path = self._prompt_path(path_value)
+        if path is None:
+            return default
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+
+    def _prompt_path(self, path_value: Optional[str]) -> Optional[str]:
+        if not path_value:
+            return None
+        path = Path(path_value).expanduser()
+        if not path.is_absolute():
+            path = Path(str(os.getcwd())).resolve() / path
+        return str(path)
+
+    def _hash_text(self, text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def _response_schema_example(self) -> str:
         if self.args.cloud_use_memory:

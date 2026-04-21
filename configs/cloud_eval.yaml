@@ -64,6 +64,12 @@ cloud_max_api_calls: -1
 # 重试后仍失败时执行的兜底动作，可用 STOP、MOVE_FORWARD 等动作名。
 cloud_fallback_action: STOP
 
+# system prompt 模板路径；为空时使用代码内置模板。推荐使用仓库内模板，便于复现实验。
+cloud_prompt_system_path: configs/prompts/cloud_vln_depth_v2_system.txt
+
+# user prompt 模板路径；为空时使用代码内置模板。模板里会填充指令、历史、pose、深度摘要等字段。
+cloud_prompt_user_path: configs/prompts/cloud_vln_depth_v2_user.txt
+
 # 是否启用语义记忆。开启后模型每步需要返回 memory，下一步会带回 prompt。
 cloud_use_memory: true
 

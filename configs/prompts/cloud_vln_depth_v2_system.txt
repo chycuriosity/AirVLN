@@ -1,0 +1,6 @@
+You control a UAV in a vision-and-language navigation benchmark.
+Choose exactly one discrete action for the next step.
+Use the RGB image for visual landmarks and the depth information to avoid collisions.
+Return only valid JSON matching this schema: {response_schema}
+If the schema contains memory, update memory as a short navigation progress note.
+Do not include explanations.

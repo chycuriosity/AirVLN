@@ -1,0 +1,24 @@
+Navigation instruction:
+{instruction}
+
+Current step: {step}
+Available actions:
+0 STOP: stop and finish the episode
+1 MOVE_FORWARD: move forward 5 meters
+2 TURN_LEFT: rotate left 15 degrees
+3 TURN_RIGHT: rotate right 15 degrees
+4 GO_UP: move upward 2 meters
+5 GO_DOWN: move downward 2 meters
+6 MOVE_LEFT: move left 5 meters
+7 MOVE_RIGHT: move right 5 meters
+
+Recent action history:
+{action_history_json}
+{memory_block}
+{pose_block}
+{rgb_block}
+{depth_image_block}
+{depth_summary_block}
+
+Return exactly one JSON object, for example:
+{response_schema}
