@@ -30,6 +30,7 @@ class CloudActionClient:
         self.args = args
         self.logger = logger
         self.model = args.cloud_model
+        self.depth_mode = self._parse_depth_mode(args.cloud_depth_mode)
         self.fallback_action = self._parse_fallback_action(args.cloud_fallback_action)
         self.client = self._build_client()
 
@@ -134,16 +135,15 @@ class CloudActionClient:
         system_prompt = (
             "You control a UAV in a vision-and-language navigation benchmark. "
             "Choose exactly one discrete action for the next step. "
+            "Use the RGB image for visual landmarks and the depth information to avoid collisions. "
             "Return only valid JSON with action_id and action_name. "
             "Do not include explanations."
         )
         user_text = self._build_user_text(observation, episode, step, history)
 
-        if self.args.cloud_no_rgb or "rgb" not in observation or observation["rgb"] is None:
-            content = user_text
-        else:
-            content = [
-                {"type": "text", "text": user_text},
+        content = [{"type": "text", "text": user_text}]
+        if not self.args.cloud_no_rgb and "rgb" in observation and observation["rgb"] is not None:
+            content.append(
                 {
                     "type": "image_url",
                     "image_url": {
@@ -151,8 +151,23 @@ class CloudActionClient:
                             self._rgb_to_base64_jpeg(observation["rgb"])
                         )
                     },
-                },
-            ]
+                }
+            )
+
+        if self._send_depth_image(observation):
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64,{}".format(
+                            self._depth_to_base64_png(observation["depth"])
+                        )
+                    },
+                }
+            )
+
+        if len(content) == 1:
+            content = user_text
 
         return [
             {"role": "system", "content": system_prompt},
@@ -168,7 +183,7 @@ class CloudActionClient:
     ) -> str:
         instruction = episode["instruction"]["instruction_text"]
         pose = observation.get("pose", [])
-        recent_history = history[-8:]
+        recent_history = self._format_action_history(history)
 
         lines = [
             "Navigation instruction:",
@@ -191,8 +206,26 @@ class CloudActionClient:
             json.dumps(recent_history, ensure_ascii=True),
         ]
 
-        if self.args.cloud_use_depth_summary and "depth" in observation and observation["depth"] is not None:
-            lines.extend(["", "Depth summary:", json.dumps(self._depth_summary(observation["depth"]), ensure_ascii=True)])
+        if not self.args.cloud_no_rgb and "rgb" in observation and observation["rgb"] is not None:
+            lines.extend([
+                "",
+                "Image 1 is the RGB observation from the UAV camera.",
+            ])
+
+        if self._send_depth_image(observation):
+            lines.extend([
+                "",
+                "Image 2 is a colorized depth map generated from the UAV depth sensor.",
+                "In the depth map, red/yellow means close obstacles and blue means farther safer space.",
+                "Avoid MOVE_FORWARD when the front-center region is red/yellow or the depth summary says it is very close.",
+            ])
+
+        if self._send_depth_summary(observation):
+            lines.extend([
+                "",
+                "Depth summary:",
+                json.dumps(self._depth_summary(observation["depth"]), ensure_ascii=True),
+            ])
 
         lines.extend([
             "",
@@ -208,6 +241,24 @@ class CloudActionClient:
         if normalized in ACTION_NAME_TO_ID:
             return ACTION_NAME_TO_ID[normalized]
         raise ValueError("Invalid --cloud_fallback_action: {}".format(value))
+
+    def _parse_depth_mode(self, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in {"none", "summary", "image", "both"}:
+            raise ValueError("Invalid --cloud_depth_mode: {}".format(value))
+        return normalized
+
+    def _send_depth_summary(self, observation: Dict[str, Any]) -> bool:
+        if "depth" not in observation or observation["depth"] is None:
+            return False
+        if self.depth_mode == "none":
+            return False
+        return bool(self.args.cloud_use_depth_summary) or self.depth_mode in {"summary", "both"}
+
+    def _send_depth_image(self, observation: Dict[str, Any]) -> bool:
+        if "depth" not in observation or observation["depth"] is None:
+            return False
+        return self.depth_mode in {"image", "both"}
 
     def _action_from_payload(self, payload: Dict[str, Any]) -> Optional[int]:
         if "action_id" in payload:
@@ -277,6 +328,54 @@ class CloudActionClient:
             name: float(np.nanmean(region)) if region.size else 0.0
             for name, region in regions.items()
         }
+
+    def _depth_to_base64_png(self, depth: np.ndarray) -> str:
+        depth_arr = self._normalize_depth(depth)
+        colorized = self._colorize_depth(depth_arr)
+        buffer = io.BytesIO()
+        Image.fromarray(colorized).save(buffer, format="PNG")
+        return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    def _normalize_depth(self, depth: np.ndarray) -> np.ndarray:
+        depth_arr = np.asarray(depth, dtype=np.float32)
+        if depth_arr.ndim == 3:
+            depth_arr = depth_arr[..., 0]
+
+        finite = depth_arr[np.isfinite(depth_arr)]
+        if finite.size == 0:
+            return np.zeros(depth_arr.shape, dtype=np.float32)
+
+        near = np.percentile(finite, float(self.args.cloud_depth_near_percentile))
+        far = np.percentile(finite, float(self.args.cloud_depth_far_percentile))
+        if far <= near:
+            far = near + 1e-6
+
+        clipped = np.clip(depth_arr, near, far)
+        normalized = (clipped - near) / (far - near)
+        normalized[~np.isfinite(normalized)] = 0.0
+        return normalized.astype(np.float32)
+
+    def _colorize_depth(self, normalized_depth: np.ndarray) -> np.ndarray:
+        # Near pixels become red/yellow; far pixels become blue. This is easier
+        # for general vision-language models to read than a raw grayscale map.
+        near_score = 1.0 - np.clip(normalized_depth, 0.0, 1.0)
+        red = np.full_like(near_score, 255.0)
+        green = np.where(near_score > 0.5, 255.0, near_score * 2.0 * 255.0)
+        blue = (1.0 - near_score) * 255.0
+        colorized = np.stack([red * near_score, green, blue], axis=-1)
+        return np.clip(colorized, 0, 255).astype(np.uint8)
+
+    def _format_action_history(self, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        formatted = []
+        for item in history[-8:]:
+            formatted.append(
+                {
+                    "step": item.get("step"),
+                    "action_id": item.get("action_id"),
+                    "action_name": item.get("action_name"),
+                }
+            )
+        return formatted
 
     def _format_array(self, value: Any) -> List[float]:
         try:

@@ -19,13 +19,13 @@ batchSize: 1
 EVAL_DATASET: val_unseen
 
 # 评测 episode 数量；-1 表示全量。
-EVAL_NUM: 1
+EVAL_NUM: 10
 
 # 单个 episode 最多执行多少步；全量正式评测通常可设为 500。
 maxAction: 100
 
 # 是否生成视频；开启后会额外写视频文件，速度更慢。
-EVAL_GENERATE_VIDEO: false
+EVAL_GENERATE_VIDEO: True
 
 # 云端模型名称。
 cloud_model: qwen3.5-flash
@@ -35,7 +35,7 @@ cloud_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
 
 # API key。请不要在这个被 git 跟踪的文件里填写真实 key。
 # 推荐在 configs/cloud_eval.local.yaml 中填写，或使用下面的环境变量。
-cloud_api_key: ""
+cloud_api_key: "sk-de7a7006111a49f8b390fee0b7660b8a"
 
 # 当 cloud_api_key 为空时，从这个环境变量读取 API key。
 cloud_api_key_env: DASHSCOPE_API_KEY
@@ -58,7 +58,18 @@ cloud_fallback_action: STOP
 # 是否不发送 RGB 图像；false 表示发送 RGB，正式 VLN 评测建议保持 false。
 cloud_no_rgb: false
 
-# 是否把深度图压缩成文本摘要发送给模型。
+# 深度图发送模式：
+# none    不发送深度信息
+# summary 只发送深度文本摘要
+# image   只发送伪彩色深度图
+# both    同时发送伪彩色深度图和文本摘要，推荐用于正式云端评测
+cloud_depth_mode: both
+
+# 深度图伪彩色渲染的近/远百分位裁剪，避免极端值破坏对比度。
+cloud_depth_near_percentile: 2.0
+cloud_depth_far_percentile: 98.0
+
+# 是否把深度图压缩成文本摘要发送给模型；cloud_depth_mode 为 both/summary 时也会发送。
 cloud_use_depth_summary: true
 
 # 是否额外保存 prompt 调试信息；默认关闭以减少日志体积。

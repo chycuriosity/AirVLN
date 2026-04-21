@@ -101,6 +101,9 @@ class Param:
         self.parser.add_argument('--cloud_max_retries', type=int, default=3)
         self.parser.add_argument('--cloud_fallback_action', type=str, default="STOP")
         self.parser.add_argument('--cloud_no_rgb', action="store_true")
+        self.parser.add_argument('--cloud_depth_mode', type=str, default="summary")
+        self.parser.add_argument('--cloud_depth_near_percentile', type=float, default=2.0)
+        self.parser.add_argument('--cloud_depth_far_percentile', type=float, default=98.0)
         self.parser.add_argument('--cloud_use_depth_summary', action="store_true")
         self.parser.add_argument('--cloud_save_prompts', action="store_true")
 

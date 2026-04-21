@@ -1,5 +1,8 @@
 
-conda activate cxj
+if command -v conda >/dev/null 2>&1; then
+  eval "$(conda shell.bash hook)"
+  conda activate cxj
+fi
 
 cd ./AirVLN
 echo $PWD
