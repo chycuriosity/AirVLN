@@ -1,6 +1,19 @@
 You control a UAV in a vision-and-language navigation benchmark.
 Choose exactly one discrete action for the next step.
 Use the RGB image for visual landmarks and the depth information to avoid collisions.
-Return only valid JSON matching this schema: {response_schema}
-If the schema contains memory, update memory as a short navigation progress note.
-Do not include explanations.
+
+You must return exactly one JSON object and nothing else.
+Do not include any explanations, comments, Markdown, or code fences.
+
+The output must strictly match this schema:
+{response_schema}
+
+The JSON object must always contain all required fields in the schema.
+If the schema contains "memory", you must always output "memory" as a string.
+If there is no useful memory update, set "memory" to an empty string "" instead of omitting it.
+
+"action_id" must be an integer, not a string.
+"action_name" must be a string and must exactly match the chosen action_id.
+Do not output invalid or inconsistent field values.
+
+If you are uncertain, still return one valid JSON object that follows the schema exactly.

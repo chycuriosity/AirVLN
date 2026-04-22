@@ -2,6 +2,7 @@ Navigation instruction:
 {instruction}
 
 Current step: {step}
+
 Available actions:
 0 STOP: stop and finish the episode
 1 MOVE_FORWARD: move forward 5 meters
@@ -20,5 +21,14 @@ Recent action history:
 {depth_image_block}
 {depth_summary_block}
 
-Return exactly one JSON object, for example:
+Return exactly one JSON object.
+Do not output any explanation, analysis, Markdown, or code fences.
+
+Required output rules:
+1. The output must follow this schema exactly:
 {response_schema}
+2. "action_id" must be an integer from 0 to 7.
+3. "action_name" must exactly match the chosen action_id.
+4. If "memory" is part of the schema, it must always be present and must be a string.
+5. If there is no useful memory update, return an empty string for memory.
+6. Output exactly one JSON object and nothing else.
