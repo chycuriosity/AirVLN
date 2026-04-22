@@ -1,0 +1,88 @@
+# 本地 A/B/C 实验级评测配置模板。
+# 默认启动脚本只生成实验计划；真正运行需要显式加 --execute。
+
+# 实验名称会用于 DATA/output/experiments/{experiment_name}_{time}/
+experiment_name: local_abc_val_unseen
+
+# AirVLN 工作空间路径；一般不用改。
+project_prefix: /data/lyj/cxj/AirVLN_ws
+
+# 本地模型 checkpoint。
+checkpoint_path: /data/lyj/cxj/AirVLN_ws/DATA/output/AirVLN-seq2seq/train/checkpoint/20251123-101135-680949/ckpt.LAST.pth
+
+# 数据集 split：train / val_seen / val_unseen / test。
+dataset: val_unseen
+
+# -1 表示全量；正式实验建议全量，调试时可改成 5、10、50。
+eval_num: -1
+
+# 每条 episode 最大步数。
+max_action: 500
+
+# 当前评测代码默认 batch_size=1 最稳定。
+batch_size: 1
+
+# B/C 组云端视觉 judge 配置。
+cloud_config: configs/cloud_eval.yaml
+
+# 如果已经有固定 episode list，可直接填写；为空时会先跑 A 组并自动复用 A 组生成的列表。
+episode_list_path:
+
+# 是否让 A 组保存 episode list。正式 A/B/C 对照必须开启。
+save_episode_list: true
+
+# 是否开启断点续跑。续跑时需要为对应组填写 resume_time。
+resume: false
+
+# 三组是否运行；只想补跑某一组时可关闭其他组。
+groups:
+  A: true
+  B: true
+  C: true
+
+# 三组输出名称，结果会进入 DATA/output/{name}/eval/...
+run_names:
+  A: AirVLN-seq2seq
+  B: AirVLN-seq2seq-intersection-detect
+  C: AirVLN-seq2seq-intersection-correct
+
+# 三组断点续跑时间戳；resume=true 时生效。
+resume_times:
+  A:
+  B:
+  C:
+
+# 三组仿真端口。并行跑时每组需要对应独立仿真服务；顺序跑可以都用同一个端口。
+simulator_ports:
+  A: 30000
+  B: 30000
+  C: 30000
+
+# 三组可见 GPU。这里是 CUDA_VISIBLE_DEVICES 的值。
+cuda_visible_devices:
+  A: "2"
+  B: "2"
+  C: "2"
+
+# trainer 内部使用第几张可见卡；如果 CUDA_VISIBLE_DEVICES 只有一张卡，一般保持 0。
+gpu_device: 0
+
+# B/C 路口实验参数。
+intersection:
+  wrong_policy: branch_mismatch
+  candidate_mode: balanced
+  turn_window: 4
+  max_events_per_episode: -1
+  cloud_confidence_threshold: 0.5
+  save_inputs: false
+
+# C 组纠错节流参数，避免过度注入参考轨迹。
+correction:
+  cooldown_steps: 8
+  max_corrections_per_episode: 3
+  max_corrections_per_cluster: 1
+
+# 三组跑完后自动生成 A/B/C 对比报告。
+compare:
+  enabled: true
+  strict: true

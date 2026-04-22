@@ -905,6 +905,30 @@ DATA/output/{name}/eval/intersection_inputs/{time}/{episode_id}/step_XXXX/
 
 推荐正式 A/B/C 实验流程：
 
+方式一：使用实验级统一入口。先复制并修改配置：
+
+```bash
+cp ./AirVLN/configs/local_abc_experiment.yaml ./AirVLN/configs/local_abc_experiment.my.yaml
+```
+
+只生成实验计划，不启动评测：
+
+```bash
+cd /data/lyj/cxj/AirVLN_ws
+bash ./AirVLN/scripts/run_local_abc_experiment.sh configs/local_abc_experiment.my.yaml
+```
+
+确认 `DATA/output/experiments/{experiment_name}_{time}/experiment_plan.json` 里的 checkpoint、split、端口、GPU、A/B/C 环境变量都正确后，再真正顺序运行 A/B/C：
+
+```bash
+cd /data/lyj/cxj/AirVLN_ws
+bash ./AirVLN/scripts/run_local_abc_experiment.sh configs/local_abc_experiment.my.yaml --execute
+```
+
+这个入口会把原始 spec 复制到实验目录，生成 `experiment_plan.json`，先跑 A 组并保存 episode list，再让 B/C 自动复用同一 episode list。三组跑完后会自动调用 `compare_local_abc_runs.py --strict` 生成报告。正式实验建议优先使用这个入口，因为它把 checkpoint、split、episode 数、maxAction、端口、GPU、B/C 路口参数锁在同一份配置里。
+
+方式二：手动运行三组：
+
 ```bash
 # A 组：保存固定 episode list
 LOCAL_EVAL_SAVE_EPISODE_LIST=1 \
