@@ -158,9 +158,10 @@ class CloudIntersectionJudge:
         )
         self.confidence_threshold = float(getattr(args, "intersection_cloud_confidence_threshold", 0.5))
 
-    def judge(self, observation, episode, model_action, step, history):
+    def judge(self, observation, episode, model_action, step, history, save_dir=None):
         messages = self._build_messages(observation, episode, model_action, step, history)
         prompt_hash = self.client._hash_messages(messages)
+        saved_inputs = self._save_inputs(messages, observation, save_dir) if save_dir is not None else {}
         started_at = time.time()
         raw_response = ""
         error = None
@@ -178,6 +179,7 @@ class CloudIntersectionJudge:
                 raw_response = completion.choices[0].message.content or ""
                 payload = self._extract_json(raw_response)
                 if payload is not None:
+                    self._save_response(saved_inputs, raw_response, payload, None)
                     confidence = float(payload.get("confidence", 0.0) or 0.0)
                     is_positive = bool(payload.get("is_intersection_challenge")) and confidence >= self.confidence_threshold
                     return is_positive, {
@@ -188,6 +190,7 @@ class CloudIntersectionJudge:
                         "attempts": attempt + 1,
                         "error": None,
                         "prompt_hash": prompt_hash,
+                        "saved_inputs": saved_inputs,
                     }
                 error = "invalid intersection judge response"
                 messages = messages + [
@@ -200,6 +203,7 @@ class CloudIntersectionJudge:
                 error = repr(exc)
                 self.logger.error("cloud intersection judge failed on attempt {}: {}".format(attempt + 1, error))
 
+        self._save_response(saved_inputs, raw_response, None, error)
         return False, {
             "raw_response": raw_response,
             "parsed": None,
@@ -208,6 +212,7 @@ class CloudIntersectionJudge:
             "attempts": int(self.args.cloud_max_retries),
             "error": error,
             "prompt_hash": prompt_hash,
+            "saved_inputs": saved_inputs,
         }
 
     def metadata(self):
@@ -297,6 +302,62 @@ class CloudIntersectionJudge:
     def _extract_json(self, text):
         return self.client._extract_json(text)
 
+    def _save_inputs(self, messages, observation, save_dir):
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        saved = {}
+
+        prompt_path = save_dir / "prompt.txt"
+        user_content = messages[1]["content"]
+        if isinstance(user_content, list):
+            prompt_text = "\n\n".join(
+                item.get("text", "")
+                for item in user_content
+                if item.get("type") == "text"
+            )
+        else:
+            prompt_text = str(user_content)
+        prompt_path.write_text(prompt_text, encoding="utf-8")
+        saved["prompt"] = str(prompt_path)
+
+        if not self.args.cloud_no_rgb and observation.get("rgb") is not None:
+            rgb_path = save_dir / "rgb.jpg"
+            self.client._save_rgb_image(observation["rgb"], rgb_path)
+            saved["rgb"] = str(rgb_path)
+
+        if self.client._send_depth_image(observation):
+            depth_path = save_dir / "depth.png"
+            self.client._save_depth_image(observation["depth"], depth_path)
+            saved["depth"] = str(depth_path)
+
+        request_path = save_dir / "request.json"
+        with open(str(request_path), "w", encoding="utf-8") as f:
+            json.dump(
+                self.client._messages_for_snapshot(messages, saved),
+                f,
+                indent=2,
+                ensure_ascii=True,
+            )
+        saved["request"] = str(request_path)
+        return saved
+
+    def _save_response(self, saved_inputs, raw_response, parsed, error):
+        if not saved_inputs or "request" not in saved_inputs:
+            return
+        response_path = Path(saved_inputs["request"]).parent / "response.json"
+        with open(str(response_path), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "raw_response": raw_response,
+                    "parsed": parsed,
+                    "error": error,
+                },
+                f,
+                indent=2,
+                ensure_ascii=True,
+            )
+        saved_inputs["response"] = str(response_path)
+
 
 class _SafeFormatDict(dict):
     def __missing__(self, key):
@@ -312,6 +373,11 @@ class IntersectionInterventionMonitor:
         self.policy = str(getattr(args, "intersection_wrong_policy", "branch_mismatch")).lower()
         self.turn_window = int(getattr(args, "intersection_turn_window", 4))
         self.max_events_per_episode = int(getattr(args, "intersection_max_events_per_episode", -1))
+        self.save_inputs = bool(getattr(args, "intersection_save_inputs", False))
+        self.input_root = Path(args.project_prefix) / "DATA/output/{}/eval/intersection_inputs/{}".format(
+            args.name,
+            args.make_dir_time,
+        )
         self.cloud_judge = None
         if self.enabled() and self.detector == "cloud":
             if logger is None:
@@ -333,6 +399,7 @@ class IntersectionInterventionMonitor:
             "cloud_error_checks": 0,
             "cloud_latency_sec_total": 0.0,
             "cloud_latency_sec_max": 0.0,
+            "input_snapshots_saved": 0,
         }
 
     def enabled(self):
@@ -382,7 +449,10 @@ class IntersectionInterventionMonitor:
                 model_action=model_action,
                 step=step,
                 history=history or [],
+                save_dir=self._input_save_dir(episode_id, step) if self.save_inputs else None,
             )
+            if cloud_meta.get("saved_inputs"):
+                self.stats["input_snapshots_saved"] += 1
             self.stats["cloud_checked_candidates"] += 1
             latency = cloud_meta.get("latency_sec")
             if latency is not None:
@@ -443,6 +513,10 @@ class IntersectionInterventionMonitor:
             event["cloud"] = cloud_meta
         self.events.append(event)
         return executed_action, event
+
+    def _input_save_dir(self, episode_id, step):
+        safe_episode_id = str(episode_id).replace("/", "_")
+        return self.input_root / safe_episode_id / "step_{:04d}".format(int(step))
 
     def summary(self, evaluated_episodes):
         summary = dict(self.stats)

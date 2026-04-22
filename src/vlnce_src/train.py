@@ -47,6 +47,120 @@ def setup():
     cudnn.deterministic = False
 
 
+def _read_json(path):
+    with open(str(path), "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_json(path, payload, indent=2):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(path), "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=indent)
+
+
+def _args_for_logging():
+    display_args = vars(args).copy()
+    if display_args.get("cloud_api_key"):
+        display_args["cloud_api_key"] = "***"
+    return display_args
+
+
+def _load_episode_ids(path_value):
+    payload = _read_json(Path(path_value).expanduser())
+    if isinstance(payload, dict):
+        episode_ids = payload.get("episode_ids", [])
+    else:
+        episode_ids = payload
+    if not isinstance(episode_ids, list) or not episode_ids:
+        raise ValueError("Episode list must be a non-empty JSON list or contain episode_ids")
+    return [str(item) for item in episode_ids]
+
+
+def _apply_episode_list(train_env, episode_ids):
+    order = {episode_id: index for index, episode_id in enumerate(episode_ids)}
+    filtered = [item for item in train_env.data if str(item["episode_id"]) in order]
+    filtered.sort(key=lambda item: order[str(item["episode_id"])])
+    found = {str(item["episode_id"]) for item in filtered}
+    missing = [episode_id for episode_id in episode_ids if episode_id not in found]
+    if missing:
+        raise ValueError("Episode list contains {} ids not found in split {}. First missing id: {}".format(
+            len(missing),
+            train_env.split,
+            missing[0],
+        ))
+    train_env.data = filtered
+    train_env.index_data = 0
+    train_env.scenes = set(item["scene_id"] for item in train_env.data)
+
+
+def _planned_episode_payload(train_env):
+    return {
+        "split": train_env.split,
+        "eval_num": args.EVAL_NUM,
+        "episode_count": len(train_env.data),
+        "episode_ids": [str(item["episode_id"]) for item in train_env.data],
+    }
+
+
+def _prepare_local_eval_plan(train_env, checkpoint_index):
+    if args.local_eval_episode_list_path:
+        episode_ids = _load_episode_ids(args.local_eval_episode_list_path)
+        _apply_episode_list(train_env, episode_ids)
+        logger.info("Loaded fixed local eval episode list: {} ids".format(len(episode_ids)))
+
+    if int(args.EVAL_NUM) != -1:
+        train_env.data = train_env.data[:int(args.EVAL_NUM)]
+        train_env.index_data = 0
+        train_env.scenes = set(item["scene_id"] for item in train_env.data)
+
+    planned_payload = _planned_episode_payload(train_env)
+    if args.local_eval_save_episode_list:
+        list_path = Path(args.project_prefix) / "DATA/output/{}/eval/episode_lists/{}/episode_list_{}.json".format(
+            args.name,
+            args.make_dir_time,
+            train_env.split,
+        )
+        _write_json(list_path, planned_payload, indent=2)
+        logger.info("Saved local eval episode list: {}".format(list_path))
+
+    completed_stats = {}
+    if args.local_eval_resume:
+        resume_time = args.local_eval_resume_time or args.make_dir_time
+        result_dir = Path(args.project_prefix) / "DATA/output/{}/eval/intermediate_results_every/{}/{}".format(
+            args.name,
+            resume_time,
+            checkpoint_index,
+        )
+        if result_dir.exists():
+            for result_file in result_dir.glob("*.json"):
+                try:
+                    payload = _read_json(result_file)
+                except Exception as exc:
+                    logger.warning("Failed to load resume result {}: {}".format(result_file, exc))
+                    continue
+                completed_stats[str(result_file.stem)] = payload
+
+        if completed_stats:
+            completed_ids = set(completed_stats.keys())
+            before = len(train_env.data)
+            train_env.data = [
+                item for item in train_env.data
+                if str(item["episode_id"]) not in completed_ids
+            ]
+            train_env.index_data = 0
+            train_env.scenes = set(item["scene_id"] for item in train_env.data)
+            logger.info("Local eval resume loaded {} completed episodes; remaining {}/{}".format(
+                len(completed_stats),
+                len(train_env.data),
+                before,
+            ))
+        else:
+            logger.info("Local eval resume enabled but no completed episodes found.")
+
+    return completed_stats
+
+
 class DDPIWTrajectoryDataset(torch.utils.data.IterableDataset):
     def __init__(
         self,
@@ -1009,7 +1123,9 @@ def train_vlnce():
 
 
 def eval_vlnce():
-    logger.info(args)
+    if args.local_eval_resume and args.local_eval_resume_time:
+        args.make_dir_time = args.local_eval_resume_time
+    logger.info(_args_for_logging())
 
     writer = TensorboardWriter(
         str(Path(args.project_prefix) / 'DATA/output/{}/eval/TensorBoard/{}'.format(args.name, args.make_dir_time)),
@@ -1090,6 +1206,7 @@ def _eval_checkpoint(
     else:
         raise KeyError
 
+    completed_stats_episodes = _prepare_local_eval_plan(train_env, checkpoint_index)
 
     #
     EVAL_RESULTS_DIR = Path(args.project_prefix) / 'DATA/output/{}/eval/results/{}'.format(args.name, args.make_dir_time)
@@ -1118,7 +1235,7 @@ def _eval_checkpoint(
 
 
     #
-    stats_episodes = {}
+    stats_episodes = dict(completed_stats_episodes)
     intersection_monitor = IntersectionInterventionMonitor(args, logger=logger)
     if intersection_monitor.enabled():
         logger.info(

@@ -824,6 +824,87 @@ DATA/output/AirVLN-seq2seq-intersection-correct/eval/intersection_events/{time}/
 
 实验解释时建议至少跑三组同 checkpoint、同 split、同 `EVAL_NUM`、同 `maxAction` 的结果：普通本地评测作为 A 组，`eval_intersection_detect.sh` 作为 B 组，`eval_intersection_correct.sh` 作为 C 组。A 与 C 的成功率差值可以近似衡量“云端视觉确认的十字路口式单步错误”被排除后的收益；B 的事件率可以衡量这种失败原因在本地模型失败中是否常见。
 
+
+#### A/B/C 实验级运行能力
+
+本地 A/B/C 评测现在支持四个实验级开关：断点续跑、固定 episode list、独立仿真端口、B/C 云端视觉输入保存。
+
+断点续跑用于长时间全量测试中断后继续跑剩余 episode。第一次运行时建议保存 episode list：
+
+```bash
+LOCAL_EVAL_SAVE_EPISODE_LIST=1 \
+bash ./AirVLN/scripts/eval.sh
+```
+
+中断后继续同一批输出目录，例如继续 `20260422-154018-274480`：
+
+```bash
+LOCAL_EVAL_RESUME=1 \
+LOCAL_EVAL_RESUME_TIME=20260422-154018-274480 \
+bash ./AirVLN/scripts/eval.sh
+```
+
+程序会读取：
+
+```text
+DATA/output/{name}/eval/intermediate_results_every/{time}/{ckpt}/*.json
+```
+
+然后跳过这些已经完成的 episode，只评测剩余样本。最终汇总时会把旧结果和新结果合并。
+
+固定 episode list 用于保证 A/B/C 严格同样本。A 组保存的列表位于：
+
+```text
+DATA/output/{name}/eval/episode_lists/{time}/episode_list_{split}.json
+```
+
+B/C 复用同一列表：
+
+```bash
+LOCAL_EVAL_EPISODE_LIST_PATH=/data/lyj/cxj/AirVLN_ws/DATA/output/AirVLN-seq2seq/eval/episode_lists/{time}/episode_list_val_unseen.json \
+bash ./AirVLN/scripts/eval_intersection_detect.sh
+```
+
+独立仿真端口用于并行跑 A/B/C。前提是你已经分别启动了多个 `AirVLNSimulatorServerTool.py`，例如端口 `30000/30001/30002`。评测侧这样指定：
+
+```bash
+LOCAL_SIMULATOR_TOOL_PORT=30001 \
+LOCAL_EVAL_CUDA_VISIBLE_DEVICES=5 \
+LOCAL_EVAL_GPU_DEVICE=0 \
+bash ./AirVLN/scripts/eval_intersection_detect.sh
+```
+
+B/C 云端视觉输入保存用于复核云端判定质量。开启后，每个经过云端检查的候选点会保存 prompt、RGB、深度图、去 base64 的 request 和 response：
+
+```bash
+LOCAL_INTERSECTION_SAVE_INPUTS=1 \
+bash ./AirVLN/scripts/eval_intersection_detect.sh
+```
+
+保存路径：
+
+```text
+DATA/output/{name}/eval/intersection_inputs/{time}/{episode_id}/step_XXXX/
+```
+
+推荐正式 A/B/C 实验流程：
+
+```bash
+# A 组：保存固定 episode list
+LOCAL_EVAL_SAVE_EPISODE_LIST=1 \
+bash ./AirVLN/scripts/eval.sh
+
+# B 组：复用 A 组 episode list，可选保存云端视觉输入
+LOCAL_EVAL_EPISODE_LIST_PATH=/path/to/episode_list_val_unseen.json \
+LOCAL_INTERSECTION_SAVE_INPUTS=1 \
+bash ./AirVLN/scripts/eval_intersection_detect.sh
+
+# C 组：复用同一 episode list
+LOCAL_EVAL_EPISODE_LIST_PATH=/path/to/episode_list_val_unseen.json \
+LOCAL_INTERSECTION_SAVE_INPUTS=1 \
+bash ./AirVLN/scripts/eval_intersection_correct.sh
+```
+
 *提示：如果您是第一次使用AirVLN代码，请先通过可视化确认在[AirVLNSimulatorClientTool.py](https://github.com/AirVLN/AirVLN/blob/main/airsim_plugin/AirVLNSimulatorClientTool.py)中函数`_getImages`获取的图像的通道顺序符合预期！*
 
 ## 📚 **常见问题**

@@ -91,6 +91,10 @@ class Param:
         self.parser.add_argument('--EVAL_DATASET', type=str, default="val_unseen")
         self.parser.add_argument("--EVAL_NUM", type=int, default=-1)
         self.parser.add_argument('--EVAL_GENERATE_VIDEO', action="store_true")
+        self.parser.add_argument('--local_eval_resume', action="store_true")
+        self.parser.add_argument('--local_eval_resume_time', type=str, default=None)
+        self.parser.add_argument('--local_eval_episode_list_path', type=str, default=None)
+        self.parser.add_argument('--local_eval_save_episode_list', action="store_true")
         self.parser.add_argument('--intersection_eval_mode', type=str, default="off", help="off/detect/correct for local checkpoint intersection-error experiments")
         self.parser.add_argument('--intersection_wrong_policy', type=str, default="branch_mismatch", help="opposite/branch_mismatch/action_mismatch")
         self.parser.add_argument('--intersection_turn_window', type=int, default=4)
@@ -99,6 +103,7 @@ class Param:
         self.parser.add_argument('--intersection_cloud_prompt_system_path', type=str, default="configs/prompts/intersection_judge_system.txt")
         self.parser.add_argument('--intersection_cloud_prompt_user_path', type=str, default="configs/prompts/intersection_judge_user.txt")
         self.parser.add_argument('--intersection_cloud_confidence_threshold', type=float, default=0.5)
+        self.parser.add_argument('--intersection_save_inputs', action="store_true")
 
         self.parser.add_argument('--cloud_model', type=str, default="qwen3.5-flash")
         self.parser.add_argument('--cloud_base_url', type=str, default="https://dashscope.aliyuncs.com/compatible-mode/v1")
