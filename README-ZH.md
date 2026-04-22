@@ -928,10 +928,11 @@ python ./AirVLN/src/vlnce_src/compare_local_abc_runs.py \
   --a /data/lyj/cxj/AirVLN_ws/DATA/output/AirVLN-seq2seq/eval/results/{a_time}/stats_ckpt_100000_val_unseen.json \
   --b /data/lyj/cxj/AirVLN_ws/DATA/output/AirVLN-seq2seq-intersection-detect/eval/results/{b_time}/stats_ckpt_100000_val_unseen.json \
   --c /data/lyj/cxj/AirVLN_ws/DATA/output/AirVLN-seq2seq-intersection-correct/eval/results/{c_time}/stats_ckpt_100000_val_unseen.json \
+  --strict \
   --output /data/lyj/cxj/AirVLN_ws/DATA/output/local_abc_report.md
 ```
 
-报告会汇总 A/B/C 的 success、nDTW、sDTW、B/C 云端视觉事件统计、C-A 指标提升、A 失败但 C 成功的 episode 数，以及事件最多的 episode。
+报告会汇总 A/B/C 的 success、nDTW、sDTW、B/C 云端视觉事件统计、C-A 指标提升、A 失败但 C 成功的 episode 数，以及事件最多的 episode。脚本还会自动读取 `run_manifests/`，检查 A/B/C 是否使用同一 checkpoint、同一 split、同一 `EVAL_NUM`、同一 `maxAction` 和同一批 episode。加上 `--strict` 后，只要存在一致性警告，脚本会以退出码 `2` 结束，适合正式实验流水线使用。
 
 *提示：如果您是第一次使用AirVLN代码，请先通过可视化确认在[AirVLNSimulatorClientTool.py](https://github.com/AirVLN/AirVLN/blob/main/airsim_plugin/AirVLNSimulatorClientTool.py)中函数`_getImages`获取的图像的通道顺序符合预期！*
 
