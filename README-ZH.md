@@ -708,6 +708,43 @@ cloud_save_prompts: true
 
 导航脚本示例，请参考 [scripts 文件夹](https://github.com/AirVLN/AirVLN/tree/main/scripts)下的文件。
 
+### 本地 checkpoint 评测
+
+当前工作空间中的本地 seq2seq 评测脚本已经适配 `cxj` 环境和 `PYTHONPATH`：
+
+```bash
+cd /data/lyj/cxj/AirVLN_ws
+bash ./AirVLN/scripts/eval.sh
+```
+
+默认使用：
+
+```text
+/data/lyj/cxj/AirVLN_ws/DATA/output/AirVLN-seq2seq/train/checkpoint/20251123-101135-680949/ckpt.LAST.pth
+```
+
+默认测试配置为：
+
+```text
+EVAL_DATASET=val_unseen
+EVAL_NUM=10
+LOCAL_EVAL_MAX_ACTION=100
+LOCAL_EVAL_BATCH_SIZE=1
+```
+
+可以通过环境变量临时覆盖：
+
+```bash
+LOCAL_EVAL_CKPT_PATH=/path/to/ckpt.499.pth \
+LOCAL_EVAL_DATASET=val_unseen \
+LOCAL_EVAL_NUM=50 \
+LOCAL_EVAL_MAX_ACTION=100 \
+LOCAL_EVAL_BATCH_SIZE=1 \
+bash ./AirVLN/scripts/eval.sh
+```
+
+脚本不会自动启动 `AirVLNSimulatorServerTool.py`。运行前请确保仿真服务已经在另一个终端启动。
+
 *提示：如果您是第一次使用AirVLN代码，请先通过可视化确认在[AirVLNSimulatorClientTool.py](https://github.com/AirVLN/AirVLN/blob/main/airsim_plugin/AirVLNSimulatorClientTool.py)中函数`_getImages`获取的图像的通道顺序符合预期！*
 
 ## 📚 **常见问题**
