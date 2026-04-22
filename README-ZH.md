@@ -751,6 +751,60 @@ bash ./AirVLN/scripts/eval.sh
 
 脚本不会自动启动 `AirVLNSimulatorServerTool.py`。运行前请确保仿真服务已经在另一个终端启动。
 
+#### 本地路口错误 B/C 组评测
+
+在本地 checkpoint 评测路径上，额外提供了两组用于分析“十字路口式错误”的实验入口。它们不调用云端模型，只复用本地 seq2seq checkpoint、原始仿真环境、原始数据集、原始指标计算和原始视频生成逻辑。
+
+这里的“十字路口式错误”是一个可复现实验代理定义：程序实时读取无人机当前位置，将它对齐到最近的 `reference_path` 点；如果附近参考动作窗口内存在左/右转向或横移动作，并且本地模型当前动作与参考动作在分支方向上冲突，就记录为一次路口错误。默认冲突策略是 `branch_mismatch`，会把左、右、前进三类分支不一致视为错误；也可以切换为更严格的 `opposite` 或更宽松的 `action_mismatch`。
+
+B 组只检测不干预，用于估计这类错误有多常见：
+
+```bash
+cd /data/lyj/cxj/AirVLN_ws
+bash ./AirVLN/scripts/eval_intersection_detect.sh
+```
+
+C 组在检测到这类错误时，只把当前一步动作替换为参考动作，下一步仍交还给本地模型自主决策，用于估计排除单步路口分支错误后成功率能提升多少：
+
+```bash
+cd /data/lyj/cxj/AirVLN_ws
+bash ./AirVLN/scripts/eval_intersection_correct.sh
+```
+
+常用覆盖参数：
+
+```bash
+LOCAL_EVAL_NUM=50 \
+LOCAL_EVAL_MAX_ACTION=500 \
+LOCAL_EVAL_CUDA_VISIBLE_DEVICES=2 \
+LOCAL_EVAL_GPU_DEVICE=0 \
+LOCAL_INTERSECTION_WRONG_POLICY=branch_mismatch \
+LOCAL_INTERSECTION_TURN_WINDOW=4 \
+LOCAL_INTERSECTION_MAX_EVENTS_PER_EPISODE=-1 \
+bash ./AirVLN/scripts/eval_intersection_detect.sh
+```
+
+参数含义：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `LOCAL_INTERSECTION_EVAL_MODE` | `off` | `detect` 为 B 组，只记录；`correct` 为 C 组，单步替换参考动作。专用脚本会自动设置。 |
+| `LOCAL_INTERSECTION_WRONG_POLICY` | `branch_mismatch` | 错误判定策略：`opposite` 只看左右/上下相反；`branch_mismatch` 看左/右/前分支冲突；`action_mismatch` 任意动作不一致都算。 |
+| `LOCAL_INTERSECTION_TURN_WINDOW` | `4` | 最近参考点前后多少个参考动作内存在转向/横移时，才认为处于候选路口附近。 |
+| `LOCAL_INTERSECTION_MAX_EVENTS_PER_EPISODE` | `-1` | 每个 episode 最多记录/纠正多少次；`-1` 表示不限。 |
+
+B/C 组会保留普通本地评测的所有输出，并额外保存路口事件文件：
+
+```text
+DATA/output/AirVLN-seq2seq-intersection-detect/eval/intersection_events/{time}/
+DATA/output/AirVLN-seq2seq-intersection-correct/eval/intersection_events/{time}/
+```
+
+其中 `events_ckpt_{ckpt}_{split}.json` 是逐事件明细，包含 episode、step、当前位置、最近参考点、模型动作、参考动作、实际执行动作和是否纠正；`summary_ckpt_{ckpt}_{split}.json` 是汇总统计。聚合指标文件 `eval/results/{time}/stats_ckpt_{ckpt}_{split}.json` 里也会新增 `intersection_` 前缀的统计项，例如事件数、发生事件的 episode 比例、平均每条 episode 的事件数和纠正次数。
+
+实验解释时建议至少跑三组同 checkpoint、同 split、同 `EVAL_NUM`、同 `maxAction` 的结果：普通本地评测作为 A 组，`eval_intersection_detect.sh` 作为 B 组，`eval_intersection_correct.sh` 作为 C 组。A 与 C 的成功率差值可以近似衡量“单步路口分支错误”被排除后的收益；B 的事件率可以衡量这类错误在失败样本中是否常见。注意，这个版本不是 RGB 语义级的真实十字路口识别器，而是基于参考轨迹和参考动作的局部代理检测，优点是可复现、无云端成本、能直接服务 benchmark 消融。
+
+
 *提示：如果您是第一次使用AirVLN代码，请先通过可视化确认在[AirVLNSimulatorClientTool.py](https://github.com/AirVLN/AirVLN/blob/main/airsim_plugin/AirVLNSimulatorClientTool.py)中函数`_getImages`获取的图像的通道顺序符合预期！*
 
 ## 📚 **常见问题**

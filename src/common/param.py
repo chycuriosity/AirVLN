@@ -91,6 +91,10 @@ class Param:
         self.parser.add_argument('--EVAL_DATASET', type=str, default="val_unseen")
         self.parser.add_argument("--EVAL_NUM", type=int, default=-1)
         self.parser.add_argument('--EVAL_GENERATE_VIDEO', action="store_true")
+        self.parser.add_argument('--intersection_eval_mode', type=str, default="off", help="off/detect/correct for local checkpoint intersection-error experiments")
+        self.parser.add_argument('--intersection_wrong_policy', type=str, default="branch_mismatch", help="opposite/branch_mismatch/action_mismatch")
+        self.parser.add_argument('--intersection_turn_window', type=int, default=4)
+        self.parser.add_argument('--intersection_max_events_per_episode', type=int, default=-1)
 
         self.parser.add_argument('--cloud_model', type=str, default="qwen3.5-flash")
         self.parser.add_argument('--cloud_base_url', type=str, default="https://dashscope.aliyuncs.com/compatible-mode/v1")

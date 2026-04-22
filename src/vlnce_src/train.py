@@ -28,8 +28,10 @@ from Model.aux_losses import AuxLosses
 from Model.utils.tensorboard_utils import TensorboardWriter
 from Model.utils.common import observations_to_image, append_text_to_image, generate_video
 
+from airsim_plugin.airsim_settings import AirsimActions
 from src.common.param import args
 from src.vlnce_src.env import AirVLNENV
+from src.vlnce_src.intersection_eval import IntersectionInterventionMonitor
 from src.vlnce_src.util import read_vocab, Tokenizer
 
 
@@ -1117,6 +1119,16 @@ def _eval_checkpoint(
 
     #
     stats_episodes = {}
+    intersection_monitor = IntersectionInterventionMonitor(args)
+    if intersection_monitor.enabled():
+        logger.info(
+            "intersection_eval enabled: mode={} wrong_policy={} turn_window={} max_events_per_episode={}".format(
+                args.intersection_eval_mode,
+                args.intersection_wrong_policy,
+                args.intersection_turn_window,
+                args.intersection_max_events_per_episode,
+            )
+        )
     episodes_to_eval = len(train_env.data)
     pbar = tqdm.tqdm(total=episodes_to_eval, dynamic_ncols=True)
 
@@ -1159,6 +1171,7 @@ def _eval_checkpoint(
             rgb_frames = [[] for _ in range(train_env.batch_size)]
 
             episodes = [[] for _ in range(train_env.batch_size)]
+            intersection_episode_events = [[] for _ in range(train_env.batch_size)]
             skips = [False for _ in range(train_env.batch_size)]
             dones = [False for _ in range(train_env.batch_size)]
             envs_to_pause = []
@@ -1180,10 +1193,45 @@ def _eval_checkpoint(
                     deterministic=True,
                     step=t,
                 )
-                prev_actions.copy_(actions)
+                model_actions = [int(temp[0]) for temp in actions.cpu().numpy()]
+                executed_actions = []
+                for env_index, model_action in enumerate(model_actions):
+                    if dones[env_index] or skips[env_index]:
+                        executed_actions.append(AirsimActions.STOP)
+                        continue
+                    current_pose = None
+                    try:
+                        current_pose = train_env.sim_states[env_index].trajectory[-1]
+                    except Exception:
+                        current_pose = observations[env_index].get("pose")
+                    executed_action, intersection_event = intersection_monitor.evaluate_step(
+                        episode=train_env.batch[env_index],
+                        current_pose=current_pose,
+                        model_action=model_action,
+                        step=t,
+                    )
+                    executed_actions.append(executed_action)
+                    if intersection_event is not None:
+                        intersection_episode_events[env_index].append(intersection_event)
+                        logger.info(
+                            "intersection_event episode={} step={} model_action={} reference_action={} executed_action={} corrected={}".format(
+                                intersection_event["episode_id"],
+                                intersection_event["step"],
+                                intersection_event["model_action_name"],
+                                intersection_event["reference_action_name"],
+                                intersection_event["executed_action_name"],
+                                intersection_event["correction_applied"],
+                            )
+                        )
+
+                prev_actions.copy_(torch.tensor(
+                    [[action] for action in executed_actions],
+                    dtype=torch.long,
+                    device=trainer.device,
+                ))
 
                 # Make action and get the new state
-                actions = [temp[0] for temp in actions.cpu().numpy()]
+                actions = executed_actions
                 train_env.makeActions(actions)
 
                 outputs = train_env.get_obs()
@@ -1243,6 +1291,8 @@ def _eval_checkpoint(
                     f"{train_env.batch[t]['episode_id']}.json",
                 )
                 f_intermediate_trajectory = {**infos[t]}
+                if intersection_episode_events[t]:
+                    f_intermediate_trajectory["intersection_events"] = intersection_episode_events[t]
                 with open(f_intermediate_result_name, "w") as f:
                     json.dump(f_intermediate_trajectory, f)
 
@@ -1317,6 +1367,11 @@ def _eval_checkpoint(
             sum(v[stat_key] for v in stats_episodes.values())
             / num_episodes
         )
+    if intersection_monitor.enabled():
+        intersection_summary = intersection_monitor.summary(num_episodes)
+        for key, value in intersection_summary.items():
+            if isinstance(value, (int, float)):
+                aggregated_stats["intersection_{}".format(key)] = value
 
     #
     fname = os.path.join(
@@ -1327,6 +1382,23 @@ def _eval_checkpoint(
         os.makedirs(EVAL_RESULTS_DIR, exist_ok=True)
     with open(fname, "w") as f:
         json.dump(aggregated_stats, f, indent=4)
+
+    if intersection_monitor.enabled():
+        EVAL_INTERSECTION_DIR = Path(args.project_prefix) / 'DATA/output/{}/eval/intersection_events/{}'.format(args.name, args.make_dir_time)
+        if not os.path.exists(EVAL_INTERSECTION_DIR):
+            os.makedirs(EVAL_INTERSECTION_DIR, exist_ok=True)
+        event_file = os.path.join(
+            str(EVAL_INTERSECTION_DIR),
+            f"events_ckpt_{checkpoint_index}_{train_env.split}.json",
+        )
+        summary_file = os.path.join(
+            str(EVAL_INTERSECTION_DIR),
+            f"summary_ckpt_{checkpoint_index}_{train_env.split}.json",
+        )
+        with open(event_file, "w") as f:
+            json.dump(intersection_monitor.events, f, indent=2)
+        with open(summary_file, "w") as f:
+            json.dump(intersection_monitor.summary(num_episodes), f, indent=4)
 
     logger.info(f"Episodes evaluated: {num_episodes}")
     checkpoint_num = checkpoint_index + 1
@@ -1351,4 +1423,3 @@ if __name__ == "__main__":
         eval_vlnce()
     else:
         raise NotImplementedError
-
