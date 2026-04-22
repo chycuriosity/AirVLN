@@ -31,7 +31,7 @@ from Model.utils.common import observations_to_image, append_text_to_image, gene
 from airsim_plugin.airsim_settings import AirsimActions
 from src.common.param import args
 from src.vlnce_src.env import AirVLNENV
-from src.vlnce_src.intersection_eval import IntersectionInterventionMonitor
+from src.vlnce_src.intersection_eval import ACTION_ID_TO_NAME, IntersectionInterventionMonitor
 from src.vlnce_src.util import read_vocab, Tokenizer
 
 
@@ -1119,11 +1119,12 @@ def _eval_checkpoint(
 
     #
     stats_episodes = {}
-    intersection_monitor = IntersectionInterventionMonitor(args)
+    intersection_monitor = IntersectionInterventionMonitor(args, logger=logger)
     if intersection_monitor.enabled():
         logger.info(
-            "intersection_eval enabled: mode={} wrong_policy={} turn_window={} max_events_per_episode={}".format(
+            "intersection_eval enabled: mode={} detector={} wrong_policy={} turn_window={} max_events_per_episode={}".format(
                 args.intersection_eval_mode,
+                args.intersection_detector,
                 args.intersection_wrong_policy,
                 args.intersection_turn_window,
                 args.intersection_max_events_per_episode,
@@ -1171,6 +1172,7 @@ def _eval_checkpoint(
             rgb_frames = [[] for _ in range(train_env.batch_size)]
 
             episodes = [[] for _ in range(train_env.batch_size)]
+            intersection_action_history = [[] for _ in range(train_env.batch_size)]
             intersection_episode_events = [[] for _ in range(train_env.batch_size)]
             skips = [False for _ in range(train_env.batch_size)]
             dones = [False for _ in range(train_env.batch_size)]
@@ -1209,8 +1211,19 @@ def _eval_checkpoint(
                         current_pose=current_pose,
                         model_action=model_action,
                         step=t,
+                        observation=observations[env_index],
+                        history=intersection_action_history[env_index],
                     )
                     executed_actions.append(executed_action)
+                    history_item = {
+                        "step": int(t),
+                        "model_action_id": int(model_action),
+                        "model_action_name": ACTION_ID_TO_NAME.get(int(model_action), "UNKNOWN"),
+                        "executed_action_id": int(executed_action),
+                        "executed_action_name": ACTION_ID_TO_NAME.get(int(executed_action), "UNKNOWN"),
+                        "correction_applied": bool(intersection_event and intersection_event.get("correction_applied")),
+                    }
+                    intersection_action_history[env_index].append(history_item)
                     if intersection_event is not None:
                         intersection_episode_events[env_index].append(intersection_event)
                         logger.info(
@@ -1391,12 +1404,19 @@ def _eval_checkpoint(
             str(EVAL_INTERSECTION_DIR),
             f"events_ckpt_{checkpoint_index}_{train_env.split}.json",
         )
+        cloud_checks_file = os.path.join(
+            str(EVAL_INTERSECTION_DIR),
+            f"cloud_checks_ckpt_{checkpoint_index}_{train_env.split}.json",
+        )
         summary_file = os.path.join(
             str(EVAL_INTERSECTION_DIR),
             f"summary_ckpt_{checkpoint_index}_{train_env.split}.json",
         )
         with open(event_file, "w") as f:
             json.dump(intersection_monitor.events, f, indent=2)
+        if intersection_monitor.cloud_checks:
+            with open(cloud_checks_file, "w") as f:
+                json.dump(intersection_monitor.cloud_checks, f, indent=2)
         with open(summary_file, "w") as f:
             json.dump(intersection_monitor.summary(num_episodes), f, indent=4)
 

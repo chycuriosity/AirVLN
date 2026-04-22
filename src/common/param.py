@@ -95,6 +95,10 @@ class Param:
         self.parser.add_argument('--intersection_wrong_policy', type=str, default="branch_mismatch", help="opposite/branch_mismatch/action_mismatch")
         self.parser.add_argument('--intersection_turn_window', type=int, default=4)
         self.parser.add_argument('--intersection_max_events_per_episode', type=int, default=-1)
+        self.parser.add_argument('--intersection_detector', type=str, default="cloud", help="cloud/reference_proxy detector for intersection experiments")
+        self.parser.add_argument('--intersection_cloud_prompt_system_path', type=str, default="configs/prompts/intersection_judge_system.txt")
+        self.parser.add_argument('--intersection_cloud_prompt_user_path', type=str, default="configs/prompts/intersection_judge_user.txt")
+        self.parser.add_argument('--intersection_cloud_confidence_threshold', type=float, default=0.5)
 
         self.parser.add_argument('--cloud_model', type=str, default="qwen3.5-flash")
         self.parser.add_argument('--cloud_base_url', type=str, default="https://dashscope.aliyuncs.com/compatible-mode/v1")

@@ -8,6 +8,7 @@ echo $PWD
 
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 
+CLOUD_CONFIG=${LOCAL_EVAL_CLOUD_CONFIG:-}
 CKPT_PATH=${LOCAL_EVAL_CKPT_PATH:-/data/lyj/cxj/AirVLN_ws/DATA/output/AirVLN-seq2seq/train/checkpoint/20251123-101135-680949/ckpt.LAST.pth}
 RUN_NAME=${LOCAL_EVAL_NAME:-AirVLN-seq2seq}
 EVAL_DATASET=${LOCAL_EVAL_DATASET:-val_unseen}
@@ -20,10 +21,17 @@ INTERSECTION_MODE=${LOCAL_INTERSECTION_EVAL_MODE:-off}
 INTERSECTION_WRONG_POLICY=${LOCAL_INTERSECTION_WRONG_POLICY:-branch_mismatch}
 INTERSECTION_TURN_WINDOW=${LOCAL_INTERSECTION_TURN_WINDOW:-4}
 INTERSECTION_MAX_EVENTS_PER_EPISODE=${LOCAL_INTERSECTION_MAX_EVENTS_PER_EPISODE:--1}
+INTERSECTION_DETECTOR=${LOCAL_INTERSECTION_DETECTOR:-cloud}
+INTERSECTION_CLOUD_CONFIDENCE_THRESHOLD=${LOCAL_INTERSECTION_CLOUD_CONFIDENCE_THRESHOLD:-0.5}
 
 export CUDA_VISIBLE_DEVICES
 
-python -u ./src/vlnce_src/train.py \
+CMD=(python -u ./src/vlnce_src/train.py)
+if [ -n "$CLOUD_CONFIG" ]; then
+  CMD+=(--cloud_config "$CLOUD_CONFIG")
+fi
+
+"${CMD[@]}" \
 --run_type eval \
 --policy_type seq2seq \
 --collect_type TF \
@@ -37,4 +45,6 @@ python -u ./src/vlnce_src/train.py \
 --intersection_eval_mode "$INTERSECTION_MODE" \
 --intersection_wrong_policy "$INTERSECTION_WRONG_POLICY" \
 --intersection_turn_window "$INTERSECTION_TURN_WINDOW" \
---intersection_max_events_per_episode "$INTERSECTION_MAX_EVENTS_PER_EPISODE"
+--intersection_max_events_per_episode "$INTERSECTION_MAX_EVENTS_PER_EPISODE" \
+--intersection_detector "$INTERSECTION_DETECTOR" \
+--intersection_cloud_confidence_threshold "$INTERSECTION_CLOUD_CONFIDENCE_THRESHOLD"
