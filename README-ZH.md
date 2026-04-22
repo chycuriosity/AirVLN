@@ -830,6 +830,14 @@ DATA/output/AirVLN-seq2seq-intersection-correct/eval/intersection_events/{time}/
 
 其中 `events_ckpt_{ckpt}_{split}.json` 是云端确认后的逐事件明细，包含 episode、step、当前位置、最近参考点、模型动作、参考动作、实际执行动作、是否纠正和云端原始回复；`cloud_checks_ckpt_{ckpt}_{split}.json` 会保存所有经过云端检查的候选点，包括云端判定为 false 的样本；`summary_ckpt_{ckpt}_{split}.json` 是汇总统计。聚合指标文件 `eval/results/{time}/stats_ckpt_{ckpt}_{split}.json` 里也会新增 `intersection_` 前缀的统计项，例如事件数、云端检查次数、云端阳性率、发生事件的 episode 比例、平均每条 episode 的事件数和纠正次数。
 
+每次本地评测还会写入运行快照：
+
+```text
+DATA/output/{name}/eval/run_manifests/{time}/manifest_ckpt_{ckpt}_{split}.json
+```
+
+这个文件会记录运行状态、checkpoint、split、评测参数、当前 AirVLN git commit、工作区是否有未提交改动、最终结果文件路径和耗时。正式实验复盘时建议同时保存 `run_manifests/`、`results/`、`intermediate_results/`、`intermediate_results_every/`，B/C 组还要保存 `intersection_events/`。
+
 实验解释时建议至少跑三组同 checkpoint、同 split、同 `EVAL_NUM`、同 `maxAction` 的结果：普通本地评测作为 A 组，`eval_intersection_detect.sh` 作为 B 组，`eval_intersection_correct.sh` 作为 C 组。A 与 C 的成功率差值可以近似衡量“云端视觉确认的十字路口式单步错误”被排除后的收益；B 的事件率可以衡量这种失败原因在本地模型失败中是否常见。
 
 
@@ -858,7 +866,7 @@ bash ./AirVLN/scripts/eval.sh
 DATA/output/{name}/eval/intermediate_results_every/{time}/{ckpt}/*.json
 ```
 
-然后跳过这些已经完成的 episode，只评测剩余样本。最终汇总时会把旧结果和新结果合并。
+然后跳过这些已经完成的 episode，只评测剩余样本。最终汇总时会把旧结果和新结果合并。对 B/C 组来说，续跑时还会读取同一 `{time}` 下已有的 `intersection_events/` 和 `cloud_checks/`，因此最终 `intersection_` 汇总会覆盖断点前后的完整事件，而不是只统计续跑后的新事件。
 
 固定 episode list 用于保证 A/B/C 严格同样本。A 组保存的列表位于：
 

@@ -9,6 +9,7 @@ import tqdm
 import math
 import random
 import json
+import subprocess
 import numpy as np
 from collections import defaultdict
 from pathlib import Path
@@ -56,7 +57,7 @@ def _write_json(path, payload, indent=2):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(str(path), "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=indent)
+        json.dump(payload, f, indent=indent, default=str)
 
 
 def _args_for_logging():
@@ -64,6 +65,27 @@ def _args_for_logging():
     if display_args.get("cloud_api_key"):
         display_args["cloud_api_key"] = "***"
     return display_args
+
+
+def _git_metadata():
+    repo_dir = Path(args.project_prefix) / "AirVLN"
+    metadata = {}
+    try:
+        metadata["commit"] = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_dir),
+            stderr=subprocess.DEVNULL,
+        ).decode("utf-8").strip()
+        status = subprocess.check_output(
+            ["git", "status", "--short"],
+            cwd=str(repo_dir),
+            stderr=subprocess.DEVNULL,
+        ).decode("utf-8").splitlines()
+        metadata["dirty"] = bool(status)
+        metadata["status_short"] = status[:50]
+    except Exception as exc:
+        metadata["error"] = str(exc)
+    return metadata
 
 
 def _load_episode_ids(path_value):
@@ -159,6 +181,63 @@ def _prepare_local_eval_plan(train_env, checkpoint_index):
             logger.info("Local eval resume enabled but no completed episodes found.")
 
     return completed_stats
+
+
+def _load_resume_intersection_state(train_env, checkpoint_index):
+    if not args.local_eval_resume:
+        return [], []
+
+    resume_time = args.local_eval_resume_time or args.make_dir_time
+    intersection_dir = Path(args.project_prefix) / "DATA/output/{}/eval/intersection_events/{}".format(
+        args.name,
+        resume_time,
+    )
+    events_path = intersection_dir / "events_ckpt_{}_{}.json".format(checkpoint_index, train_env.split)
+    checks_path = intersection_dir / "cloud_checks_ckpt_{}_{}.json".format(checkpoint_index, train_env.split)
+
+    events = []
+    cloud_checks = []
+    if events_path.exists():
+        try:
+            events = _read_json(events_path)
+        except Exception as exc:
+            logger.warning("Failed to load resume intersection events {}: {}".format(events_path, exc))
+    if checks_path.exists():
+        try:
+            cloud_checks = _read_json(checks_path)
+        except Exception as exc:
+            logger.warning("Failed to load resume intersection cloud checks {}: {}".format(checks_path, exc))
+
+    if events or cloud_checks:
+        logger.info(
+            "Local eval resume loaded intersection state: {} events, {} cloud checks".format(
+                len(events),
+                len(cloud_checks),
+            )
+        )
+    return events, cloud_checks
+
+
+def _write_local_eval_manifest(train_env, checkpoint_path, checkpoint_index, status, extra=None):
+    manifest_dir = Path(args.project_prefix) / "DATA/output/{}/eval/run_manifests/{}".format(
+        args.name,
+        args.make_dir_time,
+    )
+    manifest_path = manifest_dir / "manifest_ckpt_{}_{}.json".format(checkpoint_index, train_env.split)
+    payload = {
+        "status": status,
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "checkpoint_path": checkpoint_path,
+        "checkpoint_index": checkpoint_index,
+        "split": train_env.split,
+        "planned_episode_count": len(train_env.data),
+        "args": _args_for_logging(),
+        "git": _git_metadata(),
+    }
+    if extra:
+        payload.update(extra)
+    _write_json(manifest_path, payload, indent=2)
+    return manifest_path
 
 
 class DDPIWTrajectoryDataset(torch.utils.data.IterableDataset):
@@ -1193,6 +1272,7 @@ def _eval_checkpoint(
     checkpoint_index: int = 0,
 ) -> None:
     logger.info(f"checkpoint_path: {checkpoint_path}")
+    eval_start_time = time.time()
 
 
     if args.EVAL_DATASET == 'train':
@@ -1238,6 +1318,10 @@ def _eval_checkpoint(
     stats_episodes = dict(completed_stats_episodes)
     intersection_monitor = IntersectionInterventionMonitor(args, logger=logger)
     if intersection_monitor.enabled():
+        resume_events, resume_cloud_checks = _load_resume_intersection_state(train_env, checkpoint_index)
+        if resume_events or resume_cloud_checks:
+            intersection_monitor.restore(events=resume_events, cloud_checks=resume_cloud_checks)
+    if intersection_monitor.enabled():
         logger.info(
             "intersection_eval enabled: mode={} detector={} candidate_mode={} wrong_policy={} turn_window={} max_events_per_episode={} cooldown_steps={} max_corrections_per_episode={} max_corrections_per_cluster={}".format(
                 args.intersection_eval_mode,
@@ -1251,6 +1335,19 @@ def _eval_checkpoint(
                 args.intersection_max_corrections_per_cluster,
             )
         )
+    manifest_path = _write_local_eval_manifest(
+        train_env,
+        checkpoint_path,
+        checkpoint_index,
+        status="running",
+        extra={
+            "completed_episode_count_at_start": len(completed_stats_episodes),
+            "remaining_episode_count_at_start": len(train_env.data),
+            "intersection_restored_events": len(intersection_monitor.events) if intersection_monitor.enabled() else 0,
+            "intersection_restored_cloud_checks": len(intersection_monitor.cloud_checks) if intersection_monitor.enabled() else 0,
+        },
+    )
+    logger.info("Wrote local eval run manifest: {}".format(manifest_path))
     episodes_to_eval = len(train_env.data)
     pbar = tqdm.tqdm(total=episodes_to_eval, dynamic_ncols=True)
 
@@ -1540,6 +1637,26 @@ def _eval_checkpoint(
                 json.dump(intersection_monitor.cloud_checks, f, indent=2)
         with open(summary_file, "w") as f:
             json.dump(intersection_monitor.summary(num_episodes), f, indent=4)
+
+    manifest_extra = {
+        "completed_episode_count": num_episodes,
+        "elapsed_sec": time.time() - eval_start_time,
+        "result_file": fname,
+        "intermediate_file": f_intermediate_name,
+    }
+    if intersection_monitor.enabled():
+        manifest_extra.update({
+            "intersection_event_file": event_file,
+            "intersection_cloud_checks_file": cloud_checks_file if intersection_monitor.cloud_checks else None,
+            "intersection_summary_file": summary_file,
+        })
+    _write_local_eval_manifest(
+        train_env,
+        checkpoint_path,
+        checkpoint_index,
+        status="finished",
+        extra=manifest_extra,
+    )
 
     logger.info(f"Episodes evaluated: {num_episodes}")
     checkpoint_num = checkpoint_index + 1

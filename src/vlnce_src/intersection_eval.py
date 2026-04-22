@@ -418,6 +418,76 @@ class IntersectionInterventionMonitor:
             "input_snapshots_saved": 0,
         }
 
+    def restore(self, events=None, cloud_checks=None):
+        self.events = list(events or [])
+        self.cloud_checks = list(cloud_checks or [])
+        self.events_by_episode = defaultdict(int)
+        self.corrections_by_episode = defaultdict(int)
+        self.last_correction_step_by_episode = {}
+        self.corrections_by_episode_cluster = defaultdict(int)
+
+        self.stats.update({
+            "candidate_events": len(self.cloud_checks) if self.cloud_checks else len(self.events),
+            "wrong_decision_candidates": 0,
+            "intersection_errors": len(self.events),
+            "corrections_applied": 0,
+            "corrections_suppressed": 0,
+            "corrections_suppressed_by_cooldown": 0,
+            "corrections_suppressed_by_episode_limit": 0,
+            "corrections_suppressed_by_cluster_limit": 0,
+            "cloud_checked_candidates": len(self.cloud_checks),
+            "cloud_positive_events": 0,
+            "cloud_error_checks": 0,
+            "cloud_latency_sec_total": 0.0,
+            "cloud_latency_sec_max": 0.0,
+            "input_snapshots_saved": 0,
+        })
+
+        for check in self.cloud_checks:
+            if check.get("wrong_decision"):
+                self.stats["wrong_decision_candidates"] += 1
+            if check.get("is_intersection_challenge"):
+                self.stats["cloud_positive_events"] += 1
+            cloud_meta = check.get("cloud") or {}
+            latency = cloud_meta.get("latency_sec")
+            if latency is not None:
+                self.stats["cloud_latency_sec_total"] += float(latency)
+                self.stats["cloud_latency_sec_max"] = max(
+                    self.stats["cloud_latency_sec_max"],
+                    float(latency),
+                )
+            if cloud_meta.get("error"):
+                self.stats["cloud_error_checks"] += 1
+            if cloud_meta.get("saved_inputs"):
+                self.stats["input_snapshots_saved"] += 1
+
+        if not self.cloud_checks:
+            self.stats["wrong_decision_candidates"] = sum(
+                1 for event in self.events if event.get("wrong_decision", True)
+            )
+
+        for event in self.events:
+            episode_id = str(event.get("episode_id"))
+            step = int(event.get("step", 0))
+            cluster_id = event.get("cluster_id")
+            if cluster_id is None:
+                cluster_id = self._cluster_id(int(event.get("nearest_reference_index", 0)))
+            self.events_by_episode[episode_id] += 1
+            if event.get("correction_applied"):
+                self.stats["corrections_applied"] += 1
+                self.corrections_by_episode[episode_id] += 1
+                self.last_correction_step_by_episode[episode_id] = max(
+                    self.last_correction_step_by_episode.get(episode_id, -1),
+                    step,
+                )
+                self.corrections_by_episode_cluster[(episode_id, int(cluster_id))] += 1
+            reason = event.get("correction_suppressed_reason")
+            if reason:
+                self.stats["corrections_suppressed"] += 1
+                key = "corrections_suppressed_by_{}".format(reason)
+                if key in self.stats:
+                    self.stats[key] += 1
+
     def enabled(self):
         return self.mode in {"detect", "correct"}
 
