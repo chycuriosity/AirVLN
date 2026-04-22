@@ -1239,12 +1239,16 @@ def _eval_checkpoint(
     intersection_monitor = IntersectionInterventionMonitor(args, logger=logger)
     if intersection_monitor.enabled():
         logger.info(
-            "intersection_eval enabled: mode={} detector={} wrong_policy={} turn_window={} max_events_per_episode={}".format(
+            "intersection_eval enabled: mode={} detector={} candidate_mode={} wrong_policy={} turn_window={} max_events_per_episode={} cooldown_steps={} max_corrections_per_episode={} max_corrections_per_cluster={}".format(
                 args.intersection_eval_mode,
                 args.intersection_detector,
+                args.intersection_candidate_mode,
                 args.intersection_wrong_policy,
                 args.intersection_turn_window,
                 args.intersection_max_events_per_episode,
+                args.intersection_correction_cooldown_steps,
+                args.intersection_max_corrections_per_episode,
+                args.intersection_max_corrections_per_cluster,
             )
         )
     episodes_to_eval = len(train_env.data)

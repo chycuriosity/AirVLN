@@ -371,8 +371,12 @@ class IntersectionInterventionMonitor:
         self.mode = str(getattr(args, "intersection_eval_mode", "off")).lower()
         self.detector = str(getattr(args, "intersection_detector", "cloud")).lower()
         self.policy = str(getattr(args, "intersection_wrong_policy", "branch_mismatch")).lower()
+        self.candidate_mode = str(getattr(args, "intersection_candidate_mode", "cheap")).lower()
         self.turn_window = int(getattr(args, "intersection_turn_window", 4))
         self.max_events_per_episode = int(getattr(args, "intersection_max_events_per_episode", -1))
+        self.cooldown_steps = int(getattr(args, "intersection_correction_cooldown_steps", 0))
+        self.max_corrections_per_episode = int(getattr(args, "intersection_max_corrections_per_episode", -1))
+        self.max_corrections_per_cluster = int(getattr(args, "intersection_max_corrections_per_cluster", -1))
         self.save_inputs = bool(getattr(args, "intersection_save_inputs", False))
         self.input_root = Path(args.project_prefix) / "DATA/output/{}/eval/intersection_inputs/{}".format(
             args.name,
@@ -386,14 +390,26 @@ class IntersectionInterventionMonitor:
         self.events = []
         self.cloud_checks = []
         self.events_by_episode = defaultdict(int)
+        self.corrections_by_episode = defaultdict(int)
+        self.last_correction_step_by_episode = {}
+        self.corrections_by_episode_cluster = defaultdict(int)
         self.stats = {
             "mode": self.mode,
             "detector": self.detector,
             "wrong_policy": self.policy,
+            "candidate_mode": self.candidate_mode,
             "turn_window": self.turn_window,
+            "correction_cooldown_steps": self.cooldown_steps,
+            "max_corrections_per_episode": self.max_corrections_per_episode,
+            "max_corrections_per_cluster": self.max_corrections_per_cluster,
             "candidate_events": 0,
+            "wrong_decision_candidates": 0,
             "intersection_errors": 0,
             "corrections_applied": 0,
+            "corrections_suppressed": 0,
+            "corrections_suppressed_by_cooldown": 0,
+            "corrections_suppressed_by_episode_limit": 0,
+            "corrections_suppressed_by_cluster_limit": 0,
             "cloud_checked_candidates": 0,
             "cloud_positive_events": 0,
             "cloud_error_checks": 0,
@@ -413,6 +429,15 @@ class IntersectionInterventionMonitor:
         if self.policy == "action_mismatch":
             return int(model_action) != int(reference_action)
         raise ValueError("Unsupported intersection_wrong_policy: {}".format(self.policy))
+
+    def _should_check_cloud(self, near_turn, wrong_decision):
+        if self.candidate_mode == "cheap":
+            return bool(near_turn and wrong_decision)
+        if self.candidate_mode == "balanced":
+            return bool(near_turn)
+        if self.candidate_mode == "expensive":
+            return True
+        raise ValueError("Unsupported intersection_candidate_mode: {}".format(self.candidate_mode))
 
     def evaluate_step(self, episode, current_pose, model_action, step, observation=None, history=None):
         if not self.enabled():
@@ -434,10 +459,12 @@ class IntersectionInterventionMonitor:
         near_turn = local_reference_turn(reference_actions, reference_index, self.turn_window)
         wrong_decision = self._is_wrong_decision(model_action, reference_action)
 
-        if not (near_turn and wrong_decision):
+        if not self._should_check_cloud(near_turn, wrong_decision):
             return int(model_action), None
 
         self.stats["candidate_events"] += 1
+        if wrong_decision:
+            self.stats["wrong_decision_candidates"] += 1
 
         cloud_meta = None
         if self.detector == "cloud":
@@ -472,6 +499,9 @@ class IntersectionInterventionMonitor:
                 "model_action_name": action_name(model_action),
                 "reference_action_id": int(reference_action),
                 "reference_action_name": action_name(reference_action),
+                "near_reference_turn": bool(near_turn),
+                "wrong_decision": bool(wrong_decision),
+                "candidate_mode": self.candidate_mode,
                 "is_intersection_challenge": bool(is_intersection),
                 "cloud": cloud_meta,
             }
@@ -482,15 +512,31 @@ class IntersectionInterventionMonitor:
         elif self.detector != "reference_proxy":
             raise ValueError("Unsupported intersection_detector: {}".format(self.detector))
 
+        if not wrong_decision:
+            return int(model_action), None
+
         self.stats["intersection_errors"] += 1
         self.events_by_episode[episode_id] += 1
 
         executed_action = int(model_action)
         correction_applied = False
+        correction_suppressed_reason = None
         if self.mode == "correct":
-            executed_action = reference_action
-            correction_applied = True
-            self.stats["corrections_applied"] += 1
+            correction_suppressed_reason = self._correction_suppression_reason(
+                episode_id,
+                step,
+                reference_index,
+            )
+            if correction_suppressed_reason is None:
+                executed_action = reference_action
+                correction_applied = True
+                self.stats["corrections_applied"] += 1
+                self.corrections_by_episode[episode_id] += 1
+                self.last_correction_step_by_episode[episode_id] = int(step)
+                self.corrections_by_episode_cluster[(episode_id, self._cluster_id(reference_index))] += 1
+            else:
+                self.stats["corrections_suppressed"] += 1
+                self.stats["corrections_suppressed_by_{}".format(correction_suppressed_reason)] += 1
 
         event = {
             "episode_id": episode_id,
@@ -499,7 +545,10 @@ class IntersectionInterventionMonitor:
             "nearest_reference_index": int(reference_index),
             "deviation_m": deviation,
             "near_reference_turn": bool(near_turn),
+            "candidate_mode": self.candidate_mode,
             "wrong_policy": self.policy,
+            "wrong_decision": bool(wrong_decision),
+            "cluster_id": self._cluster_id(reference_index),
             "model_action_id": int(model_action),
             "model_action_name": action_name(model_action),
             "reference_action_id": int(reference_action),
@@ -507,6 +556,7 @@ class IntersectionInterventionMonitor:
             "executed_action_id": int(executed_action),
             "executed_action_name": action_name(executed_action),
             "correction_applied": correction_applied,
+            "correction_suppressed_reason": correction_suppressed_reason,
             "position": position.tolist() if position is not None else None,
         }
         if cloud_meta is not None:
@@ -517,6 +567,27 @@ class IntersectionInterventionMonitor:
     def _input_save_dir(self, episode_id, step):
         safe_episode_id = str(episode_id).replace("/", "_")
         return self.input_root / safe_episode_id / "step_{:04d}".format(int(step))
+
+    def _cluster_id(self, reference_index):
+        width = max(1, int(self.turn_window) * 2 + 1)
+        return int(reference_index) // width
+
+    def _correction_suppression_reason(self, episode_id, step, reference_index):
+        if self.max_corrections_per_episode >= 0:
+            if self.corrections_by_episode[episode_id] >= self.max_corrections_per_episode:
+                return "episode_limit"
+
+        last_step = self.last_correction_step_by_episode.get(episode_id)
+        if last_step is not None and self.cooldown_steps > 0:
+            if int(step) - int(last_step) <= self.cooldown_steps:
+                return "cooldown"
+
+        if self.max_corrections_per_cluster >= 0:
+            cluster_key = (episode_id, self._cluster_id(reference_index))
+            if self.corrections_by_episode_cluster[cluster_key] >= self.max_corrections_per_cluster:
+                return "cluster_limit"
+
+        return None
 
     def summary(self, evaluated_episodes):
         summary = dict(self.stats)

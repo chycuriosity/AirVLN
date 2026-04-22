@@ -795,8 +795,12 @@ LOCAL_EVAL_MAX_ACTION=500 \
 LOCAL_EVAL_CUDA_VISIBLE_DEVICES=2 \
 LOCAL_EVAL_GPU_DEVICE=0 \
 LOCAL_INTERSECTION_WRONG_POLICY=branch_mismatch \
+LOCAL_INTERSECTION_CANDIDATE_MODE=balanced \
 LOCAL_INTERSECTION_TURN_WINDOW=4 \
 LOCAL_INTERSECTION_MAX_EVENTS_PER_EPISODE=-1 \
+LOCAL_INTERSECTION_COOLDOWN_STEPS=8 \
+LOCAL_INTERSECTION_MAX_CORRECTIONS_PER_EPISODE=3 \
+LOCAL_INTERSECTION_MAX_CORRECTIONS_PER_CLUSTER=1 \
 LOCAL_INTERSECTION_CLOUD_CONFIDENCE_THRESHOLD=0.5 \
 bash ./AirVLN/scripts/eval_intersection_detect.sh
 ```
@@ -809,8 +813,12 @@ bash ./AirVLN/scripts/eval_intersection_detect.sh
 | `LOCAL_INTERSECTION_DETECTOR` | `cloud` | B/C 组默认必须使用云端视觉模型做十字路口难题判定；`reference_proxy` 仅保留为调试用，不应用作正式实验。 |
 | `LOCAL_EVAL_CLOUD_CONFIG` | `configs/cloud_eval.yaml` | 云端视觉判定使用的配置文件。 |
 | `LOCAL_INTERSECTION_WRONG_POLICY` | `branch_mismatch` | 候选错误筛选策略：`opposite` 只看左右/上下相反；`branch_mismatch` 看左/右/前分支冲突；`action_mismatch` 任意动作不一致都算。 |
-| `LOCAL_INTERSECTION_TURN_WINDOW` | `4` | 最近参考点前后多少个参考动作内存在转向/横移时，才触发云端视觉判定。 |
-| `LOCAL_INTERSECTION_MAX_EVENTS_PER_EPISODE` | `-1` | 每个 episode 最多记录/纠正多少个云端确认事件；`-1` 表示不限。 |
+| `LOCAL_INTERSECTION_CANDIDATE_MODE` | B/C 默认 `balanced` | 云端候选筛选策略：`cheap` 只检查参考转向且动作冲突点；`balanced` 检查参考转向附近，再确认动作是否冲突；`expensive` 每步都检查云端视觉。 |
+| `LOCAL_INTERSECTION_TURN_WINDOW` | `4` | 最近参考点前后多少个参考动作内存在转向/横移时，才触发 `cheap/balanced` 候选。 |
+| `LOCAL_INTERSECTION_MAX_EVENTS_PER_EPISODE` | `-1` | 每个 episode 最多记录多少个云端确认事件；`-1` 表示不限。 |
+| `LOCAL_INTERSECTION_COOLDOWN_STEPS` | C 组默认 `8` | C 组两次纠错之间至少间隔多少步，避免同一局部路口连续被参考动作强拉。 |
+| `LOCAL_INTERSECTION_MAX_CORRECTIONS_PER_EPISODE` | C 组默认 `3` | C 组每个 episode 最多实际纠正多少次。 |
+| `LOCAL_INTERSECTION_MAX_CORRECTIONS_PER_CLUSTER` | C 组默认 `1` | C 组同一参考轨迹局部簇最多纠正多少次。 |
 | `LOCAL_INTERSECTION_CLOUD_CONFIDENCE_THRESHOLD` | `0.5` | 云端返回 `is_intersection_challenge=true` 且 `confidence` 不低于该阈值时，才计为事件。 |
 
 B/C 组会保留普通本地评测的所有输出，并额外保存路口事件文件：
@@ -904,6 +912,18 @@ LOCAL_EVAL_EPISODE_LIST_PATH=/path/to/episode_list_val_unseen.json \
 LOCAL_INTERSECTION_SAVE_INPUTS=1 \
 bash ./AirVLN/scripts/eval_intersection_correct.sh
 ```
+
+A/B/C 跑完后可以生成自动对比报告：
+
+```bash
+python ./AirVLN/src/vlnce_src/compare_local_abc_runs.py \
+  --a /data/lyj/cxj/AirVLN_ws/DATA/output/AirVLN-seq2seq/eval/results/{a_time}/stats_ckpt_100000_val_unseen.json \
+  --b /data/lyj/cxj/AirVLN_ws/DATA/output/AirVLN-seq2seq-intersection-detect/eval/results/{b_time}/stats_ckpt_100000_val_unseen.json \
+  --c /data/lyj/cxj/AirVLN_ws/DATA/output/AirVLN-seq2seq-intersection-correct/eval/results/{c_time}/stats_ckpt_100000_val_unseen.json \
+  --output /data/lyj/cxj/AirVLN_ws/DATA/output/local_abc_report.md
+```
+
+报告会汇总 A/B/C 的 success、nDTW、sDTW、B/C 云端视觉事件统计、C-A 指标提升、A 失败但 C 成功的 episode 数，以及事件最多的 episode。
 
 *提示：如果您是第一次使用AirVLN代码，请先通过可视化确认在[AirVLNSimulatorClientTool.py](https://github.com/AirVLN/AirVLN/blob/main/airsim_plugin/AirVLNSimulatorClientTool.py)中函数`_getImages`获取的图像的通道顺序符合预期！*
 
