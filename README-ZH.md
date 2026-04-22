@@ -728,13 +728,13 @@ bash ./AirVLN/scripts/eval.sh
 ```text
 EVAL_DATASET=val_unseen
 EVAL_NUM=-1
-LOCAL_EVAL_MAX_ACTION=100
+LOCAL_EVAL_MAX_ACTION=500
 LOCAL_EVAL_BATCH_SIZE=1
 LOCAL_EVAL_CUDA_VISIBLE_DEVICES=2
 LOCAL_EVAL_GPU_DEVICE=0
 ```
 
-其中 `EVAL_NUM=-1` 表示跑完整个 split；当前默认是全量 `val_unseen`。`LOCAL_EVAL_MAX_ACTION=100` 是为了控制本地 checkpoint 全量评测耗时；如果需要严格恢复原始 AirVLN 默认步长，可以临时设置 `LOCAL_EVAL_MAX_ACTION=500`。`LOCAL_EVAL_CUDA_VISIBLE_DEVICES` 是物理 GPU 编号，`LOCAL_EVAL_GPU_DEVICE` 是 PyTorch 进程内可见 GPU 编号；默认绑定物理 GPU 2，并在进程内使用 `cuda:0`。
+其中 `EVAL_NUM=-1` 表示跑完整个 split；当前默认是全量 `val_unseen`。`LOCAL_EVAL_MAX_ACTION=500` 对齐原始 AirVLN 默认最大步长，适合实验级 benchmark；如果只是调试流程，可以临时设置较小的步长，例如 `LOCAL_EVAL_MAX_ACTION=100`。`LOCAL_EVAL_CUDA_VISIBLE_DEVICES` 是物理 GPU 编号，`LOCAL_EVAL_GPU_DEVICE` 是 PyTorch 进程内可见 GPU 编号；默认绑定物理 GPU 2，并在进程内使用 `cuda:0`。
 
 可以通过环境变量临时覆盖：
 
@@ -742,7 +742,7 @@ LOCAL_EVAL_GPU_DEVICE=0
 LOCAL_EVAL_CKPT_PATH=/path/to/ckpt.499.pth \
 LOCAL_EVAL_DATASET=val_unseen \
 LOCAL_EVAL_NUM=50 \
-LOCAL_EVAL_MAX_ACTION=100 \
+LOCAL_EVAL_MAX_ACTION=500 \
 LOCAL_EVAL_BATCH_SIZE=1 \
 LOCAL_EVAL_CUDA_VISIBLE_DEVICES=2 \
 LOCAL_EVAL_GPU_DEVICE=0 \
