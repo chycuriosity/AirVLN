@@ -7,6 +7,7 @@ Recent executed action history:
 {action_history_json}
 {pose_block}
 {depth_summary_block}
+{branch_visibility_block}
 
 Image 1 is the UAV RGB observation.
 If present, Image 2 is a colorized depth map where red/yellow means closer obstacles and blue means farther space.
@@ -15,9 +16,9 @@ Question:
 Does the current visual scene contain an intersection-like branching decision point that should be counted as the target failure mode for this experiment?
 
 Use this definition:
-- Count true when the image shows a road/path/building-corridor style split, crossroad, fork, T-junction, left/right branch, or visually plausible multiple route choices.
+- Count true when the image shows a road/path/building-corridor style split, crossroad, fork, T-junction, street-corner junction, left/right branch, bridge entry/exit choice, or visually plausible multiple route choices with clear junction geometry.
 - Count true only if a wrong branch choice would likely be costly for reaching the described destination.
-- Count false for ordinary turning, open-space drifting, obstacle avoidance without route branching, altitude adjustment, or cases where there is no visible branching ambiguity.
+- Count false for ordinary turning, open-space drifting, obstacle avoidance without route branching, altitude adjustment, waterfront openness, plaza-like widening, curved sidewalks, or cases where there is no visible branching ambiguity.
 - Do not decide whether the model action is correct; only judge whether the visual scene is the target intersection-like difficult decision point.
 
 Return exactly one JSON object:

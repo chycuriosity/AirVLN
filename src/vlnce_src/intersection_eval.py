@@ -159,8 +159,10 @@ def depth_branch_openness(depth):
 DEFAULT_INTERSECTION_SYSTEM_PROMPT = (
     "You are a visual auditor for a UAV vision-and-language navigation benchmark. "
     "Your job is not to navigate. Decide whether the current UAV RGB/depth observation "
-    "shows a high-stakes intersection, fork, crossroad, or branching decision point where "
+    "shows a high-stakes street-level intersection, fork, crossroad, street-corner junction, or branching decision point where "
     "choosing the wrong left/right/forward branch would likely cause a large navigation error. "
+    "Prefer true only for explicit road or corridor junction geometry with distinct branch options separated by corners, road edges, building gaps, bridge entries, crosswalk-marked street corners, or T/cross layouts. "
+    "Prefer false for gentle path curvature, sidewalk widening, waterfront open space, plazas, roof edges, obstacle bypassing, or loosely open areas without a clear junction structure. "
     "Use the visual input, depth information, instruction context, and recent action context. "
     "Return only valid JSON."
 )
@@ -175,6 +177,7 @@ Recent executed action history:
 {action_history_json}
 {pose_block}
 {depth_summary_block}
+{branch_visibility_block}
 
 Image 1 is the UAV RGB observation.
 If present, Image 2 is a colorized depth map where red/yellow means closer obstacles and blue means farther space.
@@ -183,9 +186,9 @@ Question:
 Does the current visual scene contain an intersection-like branching decision point that should be counted as the target failure mode for this experiment?
 
 Use this definition:
-- Count true when the image shows a road/path/building-corridor style split, crossroad, fork, T-junction, left/right branch, or visually plausible multiple route choices.
+- Count true when the image shows a road/path/building-corridor style split, crossroad, fork, T-junction, street-corner junction, bridge entry/exit choice, left/right branch, or visually plausible multiple route choices with clear junction geometry.
 - Count true only if a wrong branch choice would likely be costly for reaching the described destination.
-- Count false for ordinary turning, open-space drifting, obstacle avoidance without route branching, altitude adjustment, or cases where there is no visible branching ambiguity.
+- Count false for ordinary turning, open-space drifting, obstacle avoidance without route branching, altitude adjustment, waterfront openness, plaza-like widening, curved sidewalks, or cases where there is no visible branching ambiguity.
 - Do not decide whether the model action is correct; only judge whether the visual scene is the target intersection-like difficult decision point.
 
 Return exactly one JSON object:
@@ -351,6 +354,7 @@ class CloudIntersectionJudge:
     def _prompt_context(self, observation, episode, model_action, step, history):
         pose_block = ""
         depth_summary_block = ""
+        branch_visibility_block = ""
         if self.args.cloud_use_pose:
             pose_block = "\nCurrent pose [x, y, z, qw, qx, qy, qz]: {}".format(
                 self.client._format_array(observation.get("pose", []))
@@ -358,6 +362,11 @@ class CloudIntersectionJudge:
         if self.client._send_depth_summary(observation):
             depth_summary_block = "\nDepth summary:\n{}".format(
                 json.dumps(self.client._depth_summary(observation["depth"]), ensure_ascii=True)
+            )
+        visibility = depth_branch_openness(observation.get("depth"))
+        if visibility is not None:
+            branch_visibility_block = "\nForward branch visibility summary from depth:\n{}".format(
+                json.dumps(visibility, ensure_ascii=True)
             )
         return {
             "instruction": episode["instruction"]["instruction_text"],
@@ -367,6 +376,7 @@ class CloudIntersectionJudge:
             "action_history_json": json.dumps(self._format_history(history), ensure_ascii=True),
             "pose_block": pose_block,
             "depth_summary_block": depth_summary_block,
+            "branch_visibility_block": branch_visibility_block,
         }
 
     def _format_history(self, history):
