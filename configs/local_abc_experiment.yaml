@@ -70,7 +70,9 @@ gpu_device: 0
 # B/C 路口实验参数。
 intersection:
   wrong_policy: branch_mismatch
-  candidate_mode: balanced
+  # strict 是正式实验推荐值：参考轨迹转向锚点附近、模型分支冲突、同一局部转向簇只送云端一次。
+  # 可选：cheap / strict / balanced / expensive。balanced 会显著增加云端调用，expensive 会每步调用。
+  candidate_mode: strict
   turn_window: 4
   max_events_per_episode: -1
   cloud_confidence_threshold: 0.5

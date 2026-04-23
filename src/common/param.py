@@ -97,7 +97,7 @@ class Param:
         self.parser.add_argument('--local_eval_save_episode_list', action="store_true")
         self.parser.add_argument('--intersection_eval_mode', type=str, default="off", help="off/detect/correct for local checkpoint intersection-error experiments")
         self.parser.add_argument('--intersection_wrong_policy', type=str, default="branch_mismatch", help="opposite/branch_mismatch/action_mismatch")
-        self.parser.add_argument('--intersection_candidate_mode', type=str, default="cheap", help="cheap/balanced/expensive cloud-check candidate policy")
+        self.parser.add_argument('--intersection_candidate_mode', type=str, default="cheap", help="cheap/strict/balanced/expensive cloud-check candidate policy")
         self.parser.add_argument('--intersection_turn_window', type=int, default=4)
         self.parser.add_argument('--intersection_max_events_per_episode', type=int, default=-1)
         self.parser.add_argument('--intersection_correction_cooldown_steps', type=int, default=0)

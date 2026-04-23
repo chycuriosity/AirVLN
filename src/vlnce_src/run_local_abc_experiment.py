@@ -110,7 +110,7 @@ def build_env(spec, group, episode_list_path=None):
     if group in {"B", "C"}:
         env.update({
             "LOCAL_INTERSECTION_WRONG_POLICY": str(intersection.get("wrong_policy", "branch_mismatch")),
-            "LOCAL_INTERSECTION_CANDIDATE_MODE": str(intersection.get("candidate_mode", "balanced")),
+            "LOCAL_INTERSECTION_CANDIDATE_MODE": str(intersection.get("candidate_mode", "strict")),
             "LOCAL_INTERSECTION_TURN_WINDOW": str(intersection.get("turn_window", 4)),
             "LOCAL_INTERSECTION_MAX_EVENTS_PER_EPISODE": str(intersection.get("max_events_per_episode", -1)),
             "LOCAL_INTERSECTION_CLOUD_CONFIDENCE_THRESHOLD": str(intersection.get("cloud_confidence_threshold", 0.5)),

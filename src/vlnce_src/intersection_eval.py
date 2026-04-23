@@ -20,6 +20,13 @@ ACTION_ID_TO_NAME = {
     AirsimActions.MOVE_RIGHT: "MOVE_RIGHT",
 }
 
+TURN_ACTIONS = {
+    AirsimActions.TURN_LEFT,
+    AirsimActions.TURN_RIGHT,
+    AirsimActions.MOVE_LEFT,
+    AirsimActions.MOVE_RIGHT,
+}
+
 
 def action_name(action_id):
     return ACTION_ID_TO_NAME.get(int(action_id), "UNKNOWN")
@@ -86,20 +93,22 @@ def nearest_reference_index(position, reference_path):
 
 
 def local_reference_turn(actions, nearest_index, window):
+    return closest_local_reference_turn(actions, nearest_index, window)[0]
+
+
+def closest_local_reference_turn(actions, nearest_index, window):
     if nearest_index is None or not actions:
-        return False
+        return False, None, None
     start = max(0, int(nearest_index) - int(window))
     end = min(len(actions), int(nearest_index) + int(window) + 1)
-    local_actions = [int(item) for item in actions[start:end]]
-    return any(
-        action in {
-            AirsimActions.TURN_LEFT,
-            AirsimActions.TURN_RIGHT,
-            AirsimActions.MOVE_LEFT,
-            AirsimActions.MOVE_RIGHT,
-        }
-        for action in local_actions
-    )
+    candidates = []
+    for index in range(start, end):
+        if int(actions[index]) in TURN_ACTIONS:
+            candidates.append((abs(index - int(nearest_index)), index))
+    if not candidates:
+        return False, None, None
+    distance, index = min(candidates)
+    return True, int(index), int(distance)
 
 
 DEFAULT_INTERSECTION_SYSTEM_PROMPT = (
@@ -393,6 +402,7 @@ class IntersectionInterventionMonitor:
         self.corrections_by_episode = defaultdict(int)
         self.last_correction_step_by_episode = {}
         self.corrections_by_episode_cluster = defaultdict(int)
+        self.checked_candidate_clusters = set()
         self.stats = {
             "mode": self.mode,
             "detector": self.detector,
@@ -411,6 +421,7 @@ class IntersectionInterventionMonitor:
             "corrections_suppressed_by_episode_limit": 0,
             "corrections_suppressed_by_cluster_limit": 0,
             "cloud_checked_candidates": 0,
+            "candidates_suppressed_by_cluster": 0,
             "cloud_positive_events": 0,
             "cloud_error_checks": 0,
             "cloud_latency_sec_total": 0.0,
@@ -425,6 +436,7 @@ class IntersectionInterventionMonitor:
         self.corrections_by_episode = defaultdict(int)
         self.last_correction_step_by_episode = {}
         self.corrections_by_episode_cluster = defaultdict(int)
+        self.checked_candidate_clusters = set()
 
         self.stats.update({
             "candidate_events": len(self.cloud_checks) if self.cloud_checks else len(self.events),
@@ -436,6 +448,7 @@ class IntersectionInterventionMonitor:
             "corrections_suppressed_by_episode_limit": 0,
             "corrections_suppressed_by_cluster_limit": 0,
             "cloud_checked_candidates": len(self.cloud_checks),
+            "candidates_suppressed_by_cluster": 0,
             "cloud_positive_events": 0,
             "cloud_error_checks": 0,
             "cloud_latency_sec_total": 0.0,
@@ -460,6 +473,11 @@ class IntersectionInterventionMonitor:
                 self.stats["cloud_error_checks"] += 1
             if cloud_meta.get("saved_inputs"):
                 self.stats["input_snapshots_saved"] += 1
+            cluster_id = check.get("candidate_cluster_id")
+            if cluster_id is None:
+                cluster_id = check.get("cluster_id")
+            if cluster_id is not None:
+                self.checked_candidate_clusters.add((str(check.get("episode_id")), int(cluster_id)))
 
         if not self.cloud_checks:
             self.stats["wrong_decision_candidates"] = sum(
@@ -503,11 +521,28 @@ class IntersectionInterventionMonitor:
     def _should_check_cloud(self, near_turn, wrong_decision):
         if self.candidate_mode == "cheap":
             return bool(near_turn and wrong_decision)
+        if self.candidate_mode == "strict":
+            return bool(near_turn and wrong_decision)
         if self.candidate_mode == "balanced":
             return bool(near_turn)
         if self.candidate_mode == "expensive":
             return True
         raise ValueError("Unsupported intersection_candidate_mode: {}".format(self.candidate_mode))
+
+    def _should_dedupe_candidate_cluster(self):
+        return self.candidate_mode in {"cheap", "strict", "balanced"}
+
+    def _strict_candidate_ok(self, reference_actions, reference_index, turn_anchor_distance):
+        if turn_anchor_distance is None or int(turn_anchor_distance) > 1:
+            return False
+        reference_action = int(reference_actions[reference_index])
+        return reference_action in {
+            AirsimActions.MOVE_FORWARD,
+            AirsimActions.TURN_LEFT,
+            AirsimActions.TURN_RIGHT,
+            AirsimActions.MOVE_LEFT,
+            AirsimActions.MOVE_RIGHT,
+        }
 
     def evaluate_step(self, episode, current_pose, model_action, step, observation=None, history=None):
         if not self.enabled():
@@ -526,11 +561,28 @@ class IntersectionInterventionMonitor:
 
         reference_index = min(int(nearest_index), len(reference_actions) - 1)
         reference_action = int(reference_actions[reference_index])
-        near_turn = local_reference_turn(reference_actions, reference_index, self.turn_window)
+        near_turn, turn_anchor_index, turn_anchor_distance = closest_local_reference_turn(
+            reference_actions,
+            reference_index,
+            self.turn_window,
+        )
         wrong_decision = self._is_wrong_decision(model_action, reference_action)
 
         if not self._should_check_cloud(near_turn, wrong_decision):
             return int(model_action), None
+        if self.candidate_mode == "strict":
+            if not self._strict_candidate_ok(reference_actions, reference_index, turn_anchor_distance):
+                return int(model_action), None
+
+        candidate_cluster_id = self._cluster_id(
+            turn_anchor_index if turn_anchor_index is not None else reference_index
+        )
+        candidate_cluster_key = (episode_id, candidate_cluster_id)
+        if self._should_dedupe_candidate_cluster() and candidate_cluster_key in self.checked_candidate_clusters:
+            self.stats["candidates_suppressed_by_cluster"] += 1
+            return int(model_action), None
+        if self._should_dedupe_candidate_cluster():
+            self.checked_candidate_clusters.add(candidate_cluster_key)
 
         self.stats["candidate_events"] += 1
         if wrong_decision:
@@ -570,6 +622,10 @@ class IntersectionInterventionMonitor:
                 "reference_action_id": int(reference_action),
                 "reference_action_name": action_name(reference_action),
                 "near_reference_turn": bool(near_turn),
+                "nearest_reference_index": int(reference_index),
+                "turn_anchor_index": int(turn_anchor_index) if turn_anchor_index is not None else None,
+                "turn_anchor_distance": int(turn_anchor_distance) if turn_anchor_distance is not None else None,
+                "candidate_cluster_id": int(candidate_cluster_id),
                 "wrong_decision": bool(wrong_decision),
                 "candidate_mode": self.candidate_mode,
                 "is_intersection_challenge": bool(is_intersection),
@@ -595,7 +651,7 @@ class IntersectionInterventionMonitor:
             correction_suppressed_reason = self._correction_suppression_reason(
                 episode_id,
                 step,
-                reference_index,
+                candidate_cluster_id,
             )
             if correction_suppressed_reason is None:
                 executed_action = reference_action
@@ -603,7 +659,7 @@ class IntersectionInterventionMonitor:
                 self.stats["corrections_applied"] += 1
                 self.corrections_by_episode[episode_id] += 1
                 self.last_correction_step_by_episode[episode_id] = int(step)
-                self.corrections_by_episode_cluster[(episode_id, self._cluster_id(reference_index))] += 1
+                self.corrections_by_episode_cluster[(episode_id, int(candidate_cluster_id))] += 1
             else:
                 self.stats["corrections_suppressed"] += 1
                 self.stats["corrections_suppressed_by_{}".format(correction_suppressed_reason)] += 1
@@ -615,10 +671,12 @@ class IntersectionInterventionMonitor:
             "nearest_reference_index": int(reference_index),
             "deviation_m": deviation,
             "near_reference_turn": bool(near_turn),
+            "turn_anchor_index": int(turn_anchor_index) if turn_anchor_index is not None else None,
+            "turn_anchor_distance": int(turn_anchor_distance) if turn_anchor_distance is not None else None,
             "candidate_mode": self.candidate_mode,
             "wrong_policy": self.policy,
             "wrong_decision": bool(wrong_decision),
-            "cluster_id": self._cluster_id(reference_index),
+            "cluster_id": int(candidate_cluster_id),
             "model_action_id": int(model_action),
             "model_action_name": action_name(model_action),
             "reference_action_id": int(reference_action),
@@ -642,7 +700,7 @@ class IntersectionInterventionMonitor:
         width = max(1, int(self.turn_window) * 2 + 1)
         return int(reference_index) // width
 
-    def _correction_suppression_reason(self, episode_id, step, reference_index):
+    def _correction_suppression_reason(self, episode_id, step, candidate_cluster_id):
         if self.max_corrections_per_episode >= 0:
             if self.corrections_by_episode[episode_id] >= self.max_corrections_per_episode:
                 return "episode_limit"
@@ -653,7 +711,7 @@ class IntersectionInterventionMonitor:
                 return "cooldown"
 
         if self.max_corrections_per_cluster >= 0:
-            cluster_key = (episode_id, self._cluster_id(reference_index))
+            cluster_key = (episode_id, int(candidate_cluster_id))
             if self.corrections_by_episode_cluster[cluster_key] >= self.max_corrections_per_cluster:
                 return "cluster_limit"
 
