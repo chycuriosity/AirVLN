@@ -717,6 +717,44 @@ cd /data/lyj/cxj/AirVLN_ws
 bash ./AirVLN/scripts/eval.sh
 ```
 
+#### 本地测评功能总览
+
+当前本地测评已经不只是原始 AirVLN 的单 checkpoint eval，而是围绕“本地模型 A/B/C 对照实验”补齐了一套实验级能力。核心入口和功能如下：
+
+| 功能 | 入口/文件 | 说明 |
+| --- | --- | --- |
+| A 组普通本地评测 | `scripts/eval.sh` | 使用本地 seq2seq checkpoint 输出动作，复用原始 AirVLN 仿真、数据集、动作执行和指标计算逻辑；`intersection_eval_mode=off`。 |
+| B 组路口错误检测 | `scripts/eval_intersection_detect.sh` | 本地模型照常控制无人机；只在疑似十字路口式错误点调用云端视觉模型判定并记录事件，不干预动作。 |
+| C 组单步路口纠错 | `scripts/eval_intersection_correct.sh` | 在云端视觉确认“十字路口式难题”且本地动作与参考动作冲突时，只把当前一步替换为参考动作，下一步交回本地模型。 |
+| A/B/C 统一实验入口 | `scripts/run_local_abc_experiment.sh` + `configs/local_abc_experiment.yaml` | 用同一份 YAML 锁定 checkpoint、split、episode 数、maxAction、端口、GPU 和 B/C 参数；默认 dry-run 只生成计划，加 `--execute` 才真正运行。 |
+| 固定 episode list | `LOCAL_EVAL_SAVE_EPISODE_LIST` / `LOCAL_EVAL_EPISODE_LIST_PATH` | A 组可保存本次 episode 顺序，B/C 或分片评测可复用同一列表，保证对照实验样本一致。 |
+| 断点续跑 | `LOCAL_EVAL_RESUME=1` + `LOCAL_EVAL_RESUME_TIME={time}` | 读取 `intermediate_results_every/{time}/{ckpt}/` 中已经完成的 episode，跳过已完成样本，只跑剩余样本。 |
+| B/C 事件续跑恢复 | `intersection_events/{time}/` | B/C 续跑时会恢复旧的 `events` 和 `cloud_checks`，最终 `intersection_` 汇总覆盖断点前后的完整事件。 |
+| 独立仿真端口 | `LOCAL_SIMULATOR_TOOL_PORT` | 可把不同评测进程绑定到不同 `AirVLNSimulatorServerTool.py` 端口，支持 A/B/C 或 shard 并行。 |
+| GPU 控制 | `LOCAL_EVAL_CUDA_VISIBLE_DEVICES` / `LOCAL_EVAL_GPU_DEVICE` | 前者控制物理 GPU 可见性，后者控制 PyTorch 进程内使用的 GPU 编号。仿真 server 的 GPU 由 `AirVLNSimulatorServerTool.py --gpus` 控制。 |
+| 运行快照 | `eval/run_manifests/{time}/manifest_ckpt_{ckpt}_{split}.json` | 记录运行状态、checkpoint、split、参数、git commit、dirty 状态、结果路径和耗时，用于实验复盘。 |
+| 逐 episode 结果 | `eval/intermediate_results_every/{time}/{ckpt}/` | 每条 episode 单独落盘，支持续跑、失败分析和后处理合并。 |
+| 聚合指标 | `eval/results/{time}/stats_ckpt_{ckpt}_{split}.json` | 保存 success、nDTW、sDTW、oracle_success、path_length、steps_taken 等均值；B/C 还包含 `intersection_` 前缀指标。 |
+| B/C 路口事件明细 | `eval/intersection_events/{time}/` | 保存云端检查样本、云端阳性事件、纠错是否生效、参考动作、模型动作、当前位置、置信度等。 |
+| B/C 输入复核包 | `LOCAL_INTERSECTION_SAVE_INPUTS=1` | 保存云端视觉判定用到的 prompt、RGB、深度图、request/response，便于人工复核 judge 质量。 |
+| A/B/C 对比报告 | `src/vlnce_src/compare_local_abc_runs.py` | 汇总 A/B/C 指标、C-A 提升、事件统计、A 失败 C 成功样本，并检查三组 checkpoint、split、episode set、maxAction 是否一致。 |
+| 分片并行评测 | 固定 episode list + 多个 `LOCAL_SIMULATOR_TOOL_PORT` | 可把同一 split 拆成多个 episode list 分片，多进程并行跑 A 组；最终需要合并各 shard 的 intermediate 结果重新计算全量指标。 |
+
+本地测评的主要输出目录：
+
+```text
+DATA/output/{name}/eval/logs/{name}_{time}.log
+DATA/output/{name}/eval/episode_lists/{time}/episode_list_{split}.json
+DATA/output/{name}/eval/run_manifests/{time}/manifest_ckpt_{ckpt}_{split}.json
+DATA/output/{name}/eval/intermediate_results_every/{time}/{ckpt}/{episode_id}.json
+DATA/output/{name}/eval/intermediate_results/{time}/stats_ckpt_{ckpt}_{split}.json
+DATA/output/{name}/eval/results/{time}/stats_ckpt_{ckpt}_{split}.json
+DATA/output/{name}/eval/intersection_events/{time}/
+DATA/output/{name}/eval/intersection_inputs/{time}/
+```
+
+注意：本地评测脚本只负责连接仿真服务，不会自动启动 `AirVLNSimulatorServerTool.py`。如果需要并行跑多个评测进程，必须先分别启动多个仿真 server，并确保端口、仿真 GPU 和模型 GPU 不互相抢资源。
+
 默认使用：
 
 ```text
