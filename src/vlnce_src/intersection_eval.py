@@ -111,6 +111,51 @@ def closest_local_reference_turn(actions, nearest_index, window):
     return True, int(index), int(distance)
 
 
+def depth_branch_openness(depth):
+    if depth is None:
+        return None
+    depth_arr = np.asarray(depth, dtype=np.float32)
+    if depth_arr.ndim == 3:
+        depth_arr = depth_arr[..., 0]
+    if depth_arr.ndim != 2 or depth_arr.size == 0:
+        return None
+
+    height, width = depth_arr.shape[:2]
+    y1 = int(height * 0.18)
+    y2 = int(height * 0.58)
+    x0 = int(width * 0.08)
+    x1 = int(width * 0.38)
+    x2 = int(width * 0.62)
+    x3 = int(width * 0.92)
+
+    band = depth_arr[y1:y2, :]
+    if band.size == 0:
+        return None
+
+    left = band[:, x0:x1]
+    front = band[:, x1:x2]
+    right = band[:, x2:x3]
+
+    def region_mean(region):
+        if region.size == 0:
+            return 0.0
+        return float(np.nanmean(region))
+
+    def region_min(region):
+        if region.size == 0:
+            return 0.0
+        return float(np.nanmin(region))
+
+    return {
+        "left_mean": region_mean(left),
+        "front_mean": region_mean(front),
+        "right_mean": region_mean(right),
+        "left_min": region_min(left),
+        "front_min": region_min(front),
+        "right_min": region_min(right),
+    }
+
+
 DEFAULT_INTERSECTION_SYSTEM_PROMPT = (
     "You are a visual auditor for a UAV vision-and-language navigation benchmark. "
     "Your job is not to navigate. Decide whether the current UAV RGB/depth observation "
@@ -427,6 +472,9 @@ class IntersectionInterventionMonitor:
         self.max_deviation_m = float(getattr(args, "intersection_max_deviation_m", 20.0))
         self.max_events_per_episode = int(getattr(args, "intersection_max_events_per_episode", -1))
         self.max_cloud_checks_per_episode = int(getattr(args, "intersection_max_cloud_checks_per_episode", 6))
+        self.depth_gate_mode = str(getattr(args, "intersection_depth_gate_mode", "cheap_strict")).lower()
+        self.min_open_branches = int(getattr(args, "intersection_min_open_branches", 2))
+        self.depth_open_threshold = float(getattr(args, "intersection_depth_open_threshold", 0.18))
         self.cooldown_steps = int(getattr(args, "intersection_correction_cooldown_steps", 0))
         self.max_corrections_per_episode = int(getattr(args, "intersection_max_corrections_per_episode", -1))
         self.max_corrections_per_cluster = int(getattr(args, "intersection_max_corrections_per_cluster", -1))
@@ -456,6 +504,9 @@ class IntersectionInterventionMonitor:
             "turn_window": self.turn_window,
             "max_deviation_m": self.max_deviation_m,
             "max_cloud_checks_per_episode": self.max_cloud_checks_per_episode,
+            "depth_gate_mode": self.depth_gate_mode,
+            "min_open_branches": self.min_open_branches,
+            "depth_open_threshold": self.depth_open_threshold,
             "correction_cooldown_steps": self.cooldown_steps,
             "max_corrections_per_episode": self.max_corrections_per_episode,
             "max_corrections_per_cluster": self.max_corrections_per_cluster,
@@ -471,6 +522,7 @@ class IntersectionInterventionMonitor:
             "candidates_suppressed_by_cluster": 0,
             "candidates_suppressed_by_deviation": 0,
             "candidates_suppressed_by_cloud_limit": 0,
+            "candidates_suppressed_by_visibility": 0,
             "cloud_cache_hits": 0,
             "cloud_positive_events": 0,
             "cloud_error_checks": 0,
@@ -502,6 +554,7 @@ class IntersectionInterventionMonitor:
             "candidates_suppressed_by_cluster": 0,
             "candidates_suppressed_by_deviation": 0,
             "candidates_suppressed_by_cloud_limit": 0,
+            "candidates_suppressed_by_visibility": 0,
             "cloud_cache_hits": 0,
             "cloud_positive_events": 0,
             "cloud_error_checks": 0,
@@ -605,6 +658,48 @@ class IntersectionInterventionMonitor:
             AirsimActions.MOVE_RIGHT,
         }
 
+    def _should_apply_visibility_gate(self):
+        if self.depth_gate_mode == "off":
+            return False
+        if self.depth_gate_mode == "strict":
+            return self.candidate_mode == "strict"
+        if self.depth_gate_mode == "cheap_strict":
+            return self.candidate_mode in {"cheap", "strict"}
+        if self.depth_gate_mode == "all":
+            return True
+        raise ValueError("Unsupported intersection_depth_gate_mode: {}".format(self.depth_gate_mode))
+
+    def _visibility_gate(self, observation, reference_action):
+        if observation is None or observation.get("depth") is None:
+            return True, None
+
+        branch_visibility = depth_branch_openness(observation.get("depth"))
+        if branch_visibility is None:
+            return True, None
+
+        threshold = float(self.depth_open_threshold)
+        open_flags = {
+            "left": branch_visibility["left_mean"] >= threshold,
+            "front": branch_visibility["front_mean"] >= threshold,
+            "right": branch_visibility["right_mean"] >= threshold,
+        }
+        open_count = sum(1 for flag in open_flags.values() if flag)
+        target_branch = action_branch(reference_action)
+        target_branch_open = open_flags.get(target_branch, True)
+        pass_gate = open_count >= max(1, int(self.min_open_branches)) and bool(target_branch_open)
+
+        details = {
+            "mode": self.depth_gate_mode,
+            "threshold": threshold,
+            "min_open_branches": int(self.min_open_branches),
+            "open_flags": open_flags,
+            "open_count": int(open_count),
+            "target_branch": target_branch,
+            "target_branch_open": bool(target_branch_open),
+            "depth_branch_visibility": branch_visibility,
+        }
+        return pass_gate, details
+
     def evaluate_step(self, episode, current_pose, model_action, step, observation=None, history=None):
         if not self.enabled():
             return int(model_action), None
@@ -636,6 +731,12 @@ class IntersectionInterventionMonitor:
             return int(model_action), None
         if self.candidate_mode == "strict":
             if not self._strict_candidate_ok(reference_actions, reference_index, turn_anchor_distance):
+                return int(model_action), None
+        visibility_gate = None
+        if self._should_apply_visibility_gate():
+            pass_gate, visibility_gate = self._visibility_gate(observation, reference_action)
+            if not pass_gate:
+                self.stats["candidates_suppressed_by_visibility"] += 1
                 return int(model_action), None
 
         candidate_cluster_id = self._cluster_id(
@@ -698,6 +799,7 @@ class IntersectionInterventionMonitor:
                 "candidate_cluster_id": int(candidate_cluster_id),
                 "wrong_decision": bool(wrong_decision),
                 "candidate_mode": self.candidate_mode,
+                "visibility_gate": visibility_gate,
                 "is_intersection_challenge": bool(is_intersection),
                 "cloud": cloud_meta,
             }
@@ -744,6 +846,7 @@ class IntersectionInterventionMonitor:
             "turn_anchor_index": int(turn_anchor_index) if turn_anchor_index is not None else None,
             "turn_anchor_distance": int(turn_anchor_distance) if turn_anchor_distance is not None else None,
             "candidate_mode": self.candidate_mode,
+            "visibility_gate": visibility_gate,
             "wrong_policy": self.policy,
             "wrong_decision": bool(wrong_decision),
             "cluster_id": int(candidate_cluster_id),

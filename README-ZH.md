@@ -947,6 +947,32 @@ bash ./AirVLN/scripts/eval_intersection_detect.sh
 DATA/output/{name}/eval/intersection_inputs/{time}/{episode_id}/step_XXXX/
 ```
 
+当前 B/C 默认还会先经过一层本地深度门控，再决定是否把候选点送给云端视觉 judge。这样可以过滤掉大量“直道、贴墙、楼顶通道、没有侧向开口”的误触发点。常用参数：
+
+```bash
+LOCAL_INTERSECTION_DEPTH_GATE_MODE=cheap_strict \
+LOCAL_INTERSECTION_MIN_OPEN_BRANCHES=2 \
+LOCAL_INTERSECTION_DEPTH_OPEN_THRESHOLD=0.18 \
+bash ./AirVLN/scripts/eval_intersection_detect.sh
+```
+
+- `LOCAL_INTERSECTION_DEPTH_GATE_MODE`
+  - `off`：关闭本地门控
+  - `strict`：只对 `strict` 候选器启用
+  - `cheap_strict`：对 `cheap` 和 `strict` 启用，当前默认
+  - `all`：对所有候选模式启用
+- `LOCAL_INTERSECTION_MIN_OPEN_BRANCHES`
+  - 当前画面左/前/右三个方向里，至少要有几个方向在深度上看起来是“开口”的，才允许送云端
+- `LOCAL_INTERSECTION_DEPTH_OPEN_THRESHOLD`
+  - 单个方向被判为“开口”的深度阈值，值越大越严格
+
+相关统计会写进 B/C 的 `summary_ckpt_*.json`：
+
+- `candidates_suppressed_by_visibility`
+- `depth_gate_mode`
+- `min_open_branches`
+- `depth_open_threshold`
+
 推荐正式 A/B/C 实验流程：
 
 方式一：使用实验级统一入口。先复制并修改配置：

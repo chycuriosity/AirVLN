@@ -79,6 +79,13 @@ intersection:
   max_events_per_episode: -1
   # 每条 episode 最多做多少次云端路口判定，避免极少数长尾样本拖慢整夜实验。
   max_cloud_checks_per_episode: 6
+  # 本地深度门控先过滤“直道/贴墙/无侧向开口”这类明显不是路口的画面，再决定是否送云端 judge。
+  # 可选：off / strict / cheap_strict / all。正式实验推荐 cheap_strict。
+  depth_gate_mode: cheap_strict
+  # 至少要看到几个可通行分支（左/前/右）才允许进入云端判断。
+  min_open_branches: 2
+  # 深度图分支开阔阈值。越大越严格，越小越容易把普通直道也当成候选。
+  depth_open_threshold: 0.18
   cloud_confidence_threshold: 0.5
   # 路口判定只需要短历史，过长历史会增加 token 和延迟。
   judge_history_size: 4
