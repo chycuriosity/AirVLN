@@ -74,8 +74,14 @@ intersection:
   # 可选：cheap / strict / balanced / expensive。balanced 会显著增加云端调用，expensive 会每步调用。
   candidate_mode: strict
   turn_window: 4
+  # 如果无人机已经偏离参考轨迹太远，单步参考纠错和路口归因都不可靠；这种点直接跳过。
+  max_deviation_m: 20
   max_events_per_episode: -1
+  # 每条 episode 最多做多少次云端路口判定，避免极少数长尾样本拖慢整夜实验。
+  max_cloud_checks_per_episode: 6
   cloud_confidence_threshold: 0.5
+  # 路口判定只需要短历史，过长历史会增加 token 和延迟。
+  judge_history_size: 4
   save_inputs: false
 
 # C 组纠错节流参数，避免过度注入参考轨迹。

@@ -112,8 +112,11 @@ def build_env(spec, group, episode_list_path=None):
             "LOCAL_INTERSECTION_WRONG_POLICY": str(intersection.get("wrong_policy", "branch_mismatch")),
             "LOCAL_INTERSECTION_CANDIDATE_MODE": str(intersection.get("candidate_mode", "strict")),
             "LOCAL_INTERSECTION_TURN_WINDOW": str(intersection.get("turn_window", 4)),
+            "LOCAL_INTERSECTION_MAX_DEVIATION_M": str(intersection.get("max_deviation_m", 20)),
             "LOCAL_INTERSECTION_MAX_EVENTS_PER_EPISODE": str(intersection.get("max_events_per_episode", -1)),
+            "LOCAL_INTERSECTION_MAX_CLOUD_CHECKS_PER_EPISODE": str(intersection.get("max_cloud_checks_per_episode", 6)),
             "LOCAL_INTERSECTION_CLOUD_CONFIDENCE_THRESHOLD": str(intersection.get("cloud_confidence_threshold", 0.5)),
+            "LOCAL_INTERSECTION_JUDGE_HISTORY_SIZE": str(intersection.get("judge_history_size", 4)),
         })
         if bool_value(intersection.get("save_inputs")):
             env["LOCAL_INTERSECTION_SAVE_INPUTS"] = "1"

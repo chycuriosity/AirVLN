@@ -157,6 +157,7 @@ class CloudIntersectionJudge:
         self.args = args
         self.logger = logger
         self.client = CloudActionClient(args, logger)
+        self.history_size = max(1, int(getattr(args, "intersection_judge_history_size", 4)))
         self.system_prompt = self._load_prompt(
             getattr(args, "intersection_cloud_prompt_system_path", None),
             DEFAULT_INTERSECTION_SYSTEM_PROMPT,
@@ -166,6 +167,21 @@ class CloudIntersectionJudge:
             DEFAULT_INTERSECTION_USER_PROMPT,
         )
         self.confidence_threshold = float(getattr(args, "intersection_cloud_confidence_threshold", 0.5))
+        self.response_cache = {}
+
+    def restore_cache(self, cloud_checks):
+        self.response_cache = {}
+        for check in cloud_checks or []:
+            cloud_meta = check.get("cloud") or {}
+            prompt_hash = cloud_meta.get("prompt_hash")
+            parsed = cloud_meta.get("parsed")
+            if prompt_hash and parsed is not None:
+                self.response_cache[str(prompt_hash)] = {
+                    "raw_response": cloud_meta.get("raw_response", ""),
+                    "parsed": parsed,
+                    "confidence": float(cloud_meta.get("confidence", 0.0) or 0.0),
+                    "attempts": int(cloud_meta.get("attempts", 1) or 1),
+                }
 
     def judge(self, observation, episode, model_action, step, history, save_dir=None):
         messages = self._build_messages(observation, episode, model_action, step, history)
@@ -174,6 +190,24 @@ class CloudIntersectionJudge:
         started_at = time.time()
         raw_response = ""
         error = None
+
+        cached = self.response_cache.get(prompt_hash)
+        if cached is not None:
+            payload = cached["parsed"]
+            confidence = float(payload.get("confidence", 0.0) or 0.0)
+            is_positive = bool(payload.get("is_intersection_challenge")) and confidence >= self.confidence_threshold
+            self._save_response(saved_inputs, cached.get("raw_response", ""), payload, None)
+            return is_positive, {
+                "raw_response": cached.get("raw_response", ""),
+                "parsed": payload,
+                "confidence": confidence,
+                "latency_sec": 0.0,
+                "attempts": int(cached.get("attempts", 1) or 1),
+                "error": None,
+                "prompt_hash": prompt_hash,
+                "saved_inputs": saved_inputs,
+                "cache_hit": True,
+            }
 
         for attempt in range(int(self.args.cloud_max_retries)):
             try:
@@ -191,6 +225,12 @@ class CloudIntersectionJudge:
                     self._save_response(saved_inputs, raw_response, payload, None)
                     confidence = float(payload.get("confidence", 0.0) or 0.0)
                     is_positive = bool(payload.get("is_intersection_challenge")) and confidence >= self.confidence_threshold
+                    self.response_cache[prompt_hash] = {
+                        "raw_response": raw_response,
+                        "parsed": payload,
+                        "confidence": confidence,
+                        "attempts": attempt + 1,
+                    }
                     return is_positive, {
                         "raw_response": raw_response,
                         "parsed": payload,
@@ -200,6 +240,7 @@ class CloudIntersectionJudge:
                         "error": None,
                         "prompt_hash": prompt_hash,
                         "saved_inputs": saved_inputs,
+                        "cache_hit": False,
                     }
                 error = "invalid intersection judge response"
                 messages = messages + [
@@ -222,6 +263,7 @@ class CloudIntersectionJudge:
             "error": error,
             "prompt_hash": prompt_hash,
             "saved_inputs": saved_inputs,
+            "cache_hit": False,
         }
 
     def metadata(self):
@@ -290,7 +332,7 @@ class CloudIntersectionJudge:
                 "executed_action": item.get("executed_action_name") or item.get("action_name"),
                 "correction_applied": item.get("correction_applied", False),
             }
-            for item in history[-8:]
+            for item in history[-self.history_size:]
         ]
 
     def _load_prompt(self, path_value, default):
@@ -382,7 +424,9 @@ class IntersectionInterventionMonitor:
         self.policy = str(getattr(args, "intersection_wrong_policy", "branch_mismatch")).lower()
         self.candidate_mode = str(getattr(args, "intersection_candidate_mode", "cheap")).lower()
         self.turn_window = int(getattr(args, "intersection_turn_window", 4))
+        self.max_deviation_m = float(getattr(args, "intersection_max_deviation_m", 20.0))
         self.max_events_per_episode = int(getattr(args, "intersection_max_events_per_episode", -1))
+        self.max_cloud_checks_per_episode = int(getattr(args, "intersection_max_cloud_checks_per_episode", 6))
         self.cooldown_steps = int(getattr(args, "intersection_correction_cooldown_steps", 0))
         self.max_corrections_per_episode = int(getattr(args, "intersection_max_corrections_per_episode", -1))
         self.max_corrections_per_cluster = int(getattr(args, "intersection_max_corrections_per_cluster", -1))
@@ -402,6 +446,7 @@ class IntersectionInterventionMonitor:
         self.corrections_by_episode = defaultdict(int)
         self.last_correction_step_by_episode = {}
         self.corrections_by_episode_cluster = defaultdict(int)
+        self.cloud_checks_by_episode = defaultdict(int)
         self.checked_candidate_clusters = set()
         self.stats = {
             "mode": self.mode,
@@ -409,6 +454,8 @@ class IntersectionInterventionMonitor:
             "wrong_policy": self.policy,
             "candidate_mode": self.candidate_mode,
             "turn_window": self.turn_window,
+            "max_deviation_m": self.max_deviation_m,
+            "max_cloud_checks_per_episode": self.max_cloud_checks_per_episode,
             "correction_cooldown_steps": self.cooldown_steps,
             "max_corrections_per_episode": self.max_corrections_per_episode,
             "max_corrections_per_cluster": self.max_corrections_per_cluster,
@@ -422,6 +469,9 @@ class IntersectionInterventionMonitor:
             "corrections_suppressed_by_cluster_limit": 0,
             "cloud_checked_candidates": 0,
             "candidates_suppressed_by_cluster": 0,
+            "candidates_suppressed_by_deviation": 0,
+            "candidates_suppressed_by_cloud_limit": 0,
+            "cloud_cache_hits": 0,
             "cloud_positive_events": 0,
             "cloud_error_checks": 0,
             "cloud_latency_sec_total": 0.0,
@@ -436,6 +486,7 @@ class IntersectionInterventionMonitor:
         self.corrections_by_episode = defaultdict(int)
         self.last_correction_step_by_episode = {}
         self.corrections_by_episode_cluster = defaultdict(int)
+        self.cloud_checks_by_episode = defaultdict(int)
         self.checked_candidate_clusters = set()
 
         self.stats.update({
@@ -449,6 +500,9 @@ class IntersectionInterventionMonitor:
             "corrections_suppressed_by_cluster_limit": 0,
             "cloud_checked_candidates": len(self.cloud_checks),
             "candidates_suppressed_by_cluster": 0,
+            "candidates_suppressed_by_deviation": 0,
+            "candidates_suppressed_by_cloud_limit": 0,
+            "cloud_cache_hits": 0,
             "cloud_positive_events": 0,
             "cloud_error_checks": 0,
             "cloud_latency_sec_total": 0.0,
@@ -456,7 +510,12 @@ class IntersectionInterventionMonitor:
             "input_snapshots_saved": 0,
         })
 
+        if self.cloud_judge is not None:
+            self.cloud_judge.restore_cache(self.cloud_checks)
+
         for check in self.cloud_checks:
+            episode_id = str(check.get("episode_id"))
+            self.cloud_checks_by_episode[episode_id] += 1
             if check.get("wrong_decision"):
                 self.stats["wrong_decision_candidates"] += 1
             if check.get("is_intersection_challenge"):
@@ -473,6 +532,8 @@ class IntersectionInterventionMonitor:
                 self.stats["cloud_error_checks"] += 1
             if cloud_meta.get("saved_inputs"):
                 self.stats["input_snapshots_saved"] += 1
+            if cloud_meta.get("cache_hit"):
+                self.stats["cloud_cache_hits"] += 1
             cluster_id = check.get("candidate_cluster_id")
             if cluster_id is None:
                 cluster_id = check.get("cluster_id")
@@ -561,6 +622,9 @@ class IntersectionInterventionMonitor:
 
         reference_index = min(int(nearest_index), len(reference_actions) - 1)
         reference_action = int(reference_actions[reference_index])
+        if deviation is not None and deviation > self.max_deviation_m:
+            self.stats["candidates_suppressed_by_deviation"] += 1
+            return int(model_action), None
         near_turn, turn_anchor_index, turn_anchor_distance = closest_local_reference_turn(
             reference_actions,
             reference_index,
@@ -592,6 +656,9 @@ class IntersectionInterventionMonitor:
         if self.detector == "cloud":
             if observation is None:
                 raise ValueError("Cloud intersection detector requires observation")
+            if self.max_cloud_checks_per_episode >= 0 and self.cloud_checks_by_episode[episode_id] >= self.max_cloud_checks_per_episode:
+                self.stats["candidates_suppressed_by_cloud_limit"] += 1
+                return int(model_action), None
             is_intersection, cloud_meta = self.cloud_judge.judge(
                 observation=observation,
                 episode=episode,
@@ -602,7 +669,10 @@ class IntersectionInterventionMonitor:
             )
             if cloud_meta.get("saved_inputs"):
                 self.stats["input_snapshots_saved"] += 1
+            if cloud_meta.get("cache_hit"):
+                self.stats["cloud_cache_hits"] += 1
             self.stats["cloud_checked_candidates"] += 1
+            self.cloud_checks_by_episode[episode_id] += 1
             latency = cloud_meta.get("latency_sec")
             if latency is not None:
                 self.stats["cloud_latency_sec_total"] += float(latency)

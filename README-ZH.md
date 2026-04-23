@@ -835,11 +835,14 @@ LOCAL_EVAL_GPU_DEVICE=0 \
 LOCAL_INTERSECTION_WRONG_POLICY=branch_mismatch \
 LOCAL_INTERSECTION_CANDIDATE_MODE=strict \
 LOCAL_INTERSECTION_TURN_WINDOW=4 \
+LOCAL_INTERSECTION_MAX_DEVIATION_M=20 \
 LOCAL_INTERSECTION_MAX_EVENTS_PER_EPISODE=-1 \
+LOCAL_INTERSECTION_MAX_CLOUD_CHECKS_PER_EPISODE=6 \
 LOCAL_INTERSECTION_COOLDOWN_STEPS=8 \
 LOCAL_INTERSECTION_MAX_CORRECTIONS_PER_EPISODE=3 \
 LOCAL_INTERSECTION_MAX_CORRECTIONS_PER_CLUSTER=1 \
 LOCAL_INTERSECTION_CLOUD_CONFIDENCE_THRESHOLD=0.5 \
+LOCAL_INTERSECTION_JUDGE_HISTORY_SIZE=4 \
 bash ./AirVLN/scripts/eval_intersection_detect.sh
 ```
 
@@ -853,11 +856,14 @@ bash ./AirVLN/scripts/eval_intersection_detect.sh
 | `LOCAL_INTERSECTION_WRONG_POLICY` | `branch_mismatch` | 候选错误筛选策略：`opposite` 只看左右/上下相反；`branch_mismatch` 看左/右/前分支冲突；`action_mismatch` 任意动作不一致都算。 |
 | `LOCAL_INTERSECTION_CANDIDATE_MODE` | B/C 默认 `strict` | 云端候选筛选策略：`strict` 是正式实验推荐值，只检查贴近参考转向锚点且动作分支冲突的点，并对同一局部转向簇去重；`cheap` 检查参考转向窗口内的动作冲突点，也会按簇去重；`balanced` 检查参考转向窗口内的候选并按簇去重，但不要求动作先冲突；`expensive` 每步都检查云端视觉，不做簇去重。 |
 | `LOCAL_INTERSECTION_TURN_WINDOW` | `4` | 最近参考点前后多少个参考动作内存在转向/横移时，才触发 `cheap/strict/balanced` 候选；`strict` 还要求最近参考点距离转向锚点不超过 1 个参考动作。 |
+| `LOCAL_INTERSECTION_MAX_DEVIATION_M` | `20` | 如果当前位置距离最近参考轨迹点超过这个阈值，B/C 会直接跳过当前候选。偏离过大时，参考动作已经不适合做局部路口归因或单步纠错。 |
 | `LOCAL_INTERSECTION_MAX_EVENTS_PER_EPISODE` | `-1` | 每个 episode 最多记录多少个云端确认事件；`-1` 表示不限。 |
+| `LOCAL_INTERSECTION_MAX_CLOUD_CHECKS_PER_EPISODE` | B 组默认 `6`，C 组默认 `4` | 每条 episode 最多做多少次云端路口判定，避免极少数长尾样本拖慢整夜评测。达到上限后只跳过后续候选，不会中止整条 episode。 |
 | `LOCAL_INTERSECTION_COOLDOWN_STEPS` | C 组默认 `8` | C 组两次纠错之间至少间隔多少步，避免同一局部路口连续被参考动作强拉。 |
 | `LOCAL_INTERSECTION_MAX_CORRECTIONS_PER_EPISODE` | C 组默认 `3` | C 组每个 episode 最多实际纠正多少次。 |
 | `LOCAL_INTERSECTION_MAX_CORRECTIONS_PER_CLUSTER` | C 组默认 `1` | C 组同一参考轨迹局部簇最多纠正多少次。 |
 | `LOCAL_INTERSECTION_CLOUD_CONFIDENCE_THRESHOLD` | `0.5` | 云端返回 `is_intersection_challenge=true` 且 `confidence` 不低于该阈值时，才计为事件。 |
+| `LOCAL_INTERSECTION_JUDGE_HISTORY_SIZE` | `4` | 发给云端路口 judge 的近期动作历史长度。路口判定只需要短历史，过长历史会增加 token 和延迟。 |
 
 B/C 组会保留普通本地评测的所有输出，并额外保存路口事件文件：
 
@@ -866,7 +872,7 @@ DATA/output/AirVLN-seq2seq-intersection-detect/eval/intersection_events/{time}/
 DATA/output/AirVLN-seq2seq-intersection-correct/eval/intersection_events/{time}/
 ```
 
-其中 `events_ckpt_{ckpt}_{split}.json` 是云端确认后的逐事件明细，包含 episode、step、当前位置、最近参考点、参考转向锚点、模型动作、参考动作、实际执行动作、是否纠正和云端原始回复；`cloud_checks_ckpt_{ckpt}_{split}.json` 会保存所有经过云端检查的候选点，包括云端判定为 false 的样本；`summary_ckpt_{ckpt}_{split}.json` 是汇总统计。聚合指标文件 `eval/results/{time}/stats_ckpt_{ckpt}_{split}.json` 里也会新增 `intersection_` 前缀的统计项，例如事件数、云端检查次数、同簇候选抑制次数、云端阳性率、发生事件的 episode 比例、平均每条 episode 的事件数和纠正次数。
+其中 `events_ckpt_{ckpt}_{split}.json` 是云端确认后的逐事件明细，包含 episode、step、当前位置、最近参考点、参考转向锚点、模型动作、参考动作、实际执行动作、是否纠正和云端原始回复；`cloud_checks_ckpt_{ckpt}_{split}.json` 会保存所有经过云端检查的候选点，包括云端判定为 false 的样本；`summary_ckpt_{ckpt}_{split}.json` 是汇总统计。聚合指标文件 `eval/results/{time}/stats_ckpt_{ckpt}_{split}.json` 里也会新增 `intersection_` 前缀的统计项，例如事件数、云端检查次数、同簇候选抑制次数、偏离过大抑制次数、云端检查上限抑制次数、云端缓存命中次数、云端阳性率、发生事件的 episode 比例、平均每条 episode 的事件数和纠正次数。
 
 每次本地评测还会写入运行快照：
 
