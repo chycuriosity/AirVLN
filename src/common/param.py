@@ -114,6 +114,8 @@ class Param:
         self.parser.add_argument('--intersection_cloud_confidence_threshold', type=float, default=0.5)
         self.parser.add_argument('--intersection_judge_history_size', type=int, default=4)
         self.parser.add_argument('--intersection_save_inputs', action="store_true")
+        self.parser.add_argument('--intersection_save_positive_inputs', action="store_true")
+        self.parser.add_argument('--intersection_save_positive_videos', action="store_true")
 
         self.parser.add_argument('--cloud_model', type=str, default="qwen3.5-flash")
         self.parser.add_argument('--cloud_base_url', type=str, default="https://dashscope.aliyuncs.com/compatible-mode/v1")

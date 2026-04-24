@@ -789,14 +789,14 @@ bash ./AirVLN/scripts/eval.sh
 
 脚本不会自动启动 `AirVLNSimulatorServerTool.py`。运行前请确保仿真服务已经在另一个终端启动。
 
-#### 本地路口错误 B/C 组评测
+#### 本地决策难点 B/C 组评测
 
-在本地 checkpoint 评测路径上，额外提供了两组用于分析“十字路口式错误”的实验入口。它们仍然使用本地 seq2seq checkpoint 产生动作，仍然复用原始仿真环境、原始数据集、动作执行、指标计算和视频生成逻辑；区别是 B/C 的“是否属于十字路口式视觉难题”由云端视觉大模型判断。
+在本地 checkpoint 评测路径上，额外提供了两组用于分析“决策难点错误”的实验入口。它们仍然使用本地 seq2seq checkpoint 产生动作，仍然复用原始仿真环境、原始数据集、动作执行、指标计算和视频生成逻辑；区别是 B/C 的“是否属于高风险决策难点”由云端视觉大模型判断。
 
 判定流程分两层：
 
-1. 本地先用参考轨迹做候选筛选：实时读取无人机当前位置，对齐最近的 `reference_path` 点，并在附近参考动作窗口内寻找最近的转向/横移“转向锚点”。正式实验默认使用 `strict` 候选模式：只有当前位置贴近转向锚点、本地模型动作与参考动作在左/右/前分支上冲突，并且同一局部转向簇此前没有被云端检查过时，才会成为“疑似错误候选”。这一步只用来减少云端请求，并确认模型确实和参考分支冲突。
-2. 对候选点调用云端视觉大模型：把当前 RGB、深度图/深度摘要、导航指令、pose 和近期动作历史发给云端模型。云端模型只判断当前视觉场景是否是岔路、十字路口、T 字路口、左右分支等高代价分支难题；它不负责输出导航动作，也不根据参考动作判断对错。
+1. 本地先用参考轨迹和当前观测做候选筛选：实时读取无人机当前位置，对齐最近的 `reference_path` 点，并在附近参考动作窗口内寻找最近的转向/横移“转向锚点”。正式实验默认使用 `strict` 候选模式：除了传统的分支冲突点外，还会结合深度开口、地标提示词和有限视野特征，补充召回遮挡地标、语义歧义和有限视野转向这类“决策难点候选”。
+2. 对候选点调用云端视觉大模型：把当前 RGB、深度图/深度摘要、导航指令、pose 和近期动作历史发给云端模型。云端模型判断当前视觉场景是否属于 `junction_like`、`occluded_landmark`、`ambiguous_landmark`、`limited_visibility_turn` 或 `memory_required` 等高风险决策难点；它不负责输出导航动作，也不根据参考动作判断对错。
 
 B 组只检测不干预，用于估计这类视觉难题错误有多常见：
 
@@ -805,7 +805,7 @@ cd /data/lyj/cxj/AirVLN_ws
 bash ./AirVLN/scripts/eval_intersection_detect.sh
 ```
 
-C 组只在“本地动作与参考动作冲突，并且云端视觉模型确认这是十字路口式难题”时，把当前一步动作替换为参考动作，下一步仍交还给本地模型自主决策：
+C 组只在“本地动作与参考动作冲突，并且云端视觉模型确认这是决策难点”时，把当前一步动作替换为参考动作，下一步仍交还给本地模型自主决策：
 
 ```bash
 cd /data/lyj/cxj/AirVLN_ws
@@ -851,7 +851,7 @@ bash ./AirVLN/scripts/eval_intersection_detect.sh
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `LOCAL_INTERSECTION_EVAL_MODE` | `off` | `detect` 为 B 组，只记录；`correct` 为 C 组，单步替换参考动作。专用脚本会自动设置。 |
-| `LOCAL_INTERSECTION_DETECTOR` | `cloud` | B/C 组默认必须使用云端视觉模型做十字路口难题判定；`reference_proxy` 仅保留为调试用，不应用作正式实验。 |
+| `LOCAL_INTERSECTION_DETECTOR` | `cloud` | B/C 组默认必须使用云端视觉模型做决策难点判定；`reference_proxy` 仅保留为调试用，不应用作正式实验。 |
 | `LOCAL_EVAL_CLOUD_CONFIG` | `configs/cloud_eval.yaml` | 云端视觉判定使用的配置文件。 |
 | `LOCAL_INTERSECTION_WRONG_POLICY` | `branch_mismatch` | 候选错误筛选策略：`opposite` 只看左右/上下相反；`branch_mismatch` 看左/右/前分支冲突；`action_mismatch` 任意动作不一致都算。 |
 | `LOCAL_INTERSECTION_CANDIDATE_MODE` | B/C 默认 `strict` | 云端候选筛选策略：`strict` 是正式实验推荐值，只检查贴近参考转向锚点且动作分支冲突的点，并对同一局部转向簇去重；`cheap` 检查参考转向窗口内的动作冲突点，也会按簇去重；`balanced` 检查参考转向窗口内的候选并按簇去重，但不要求动作先冲突；`expensive` 每步都检查云端视觉，不做簇去重。 |
@@ -862,17 +862,21 @@ bash ./AirVLN/scripts/eval_intersection_detect.sh
 | `LOCAL_INTERSECTION_COOLDOWN_STEPS` | C 组默认 `8` | C 组两次纠错之间至少间隔多少步，避免同一局部路口连续被参考动作强拉。 |
 | `LOCAL_INTERSECTION_MAX_CORRECTIONS_PER_EPISODE` | C 组默认 `3` | C 组每个 episode 最多实际纠正多少次。 |
 | `LOCAL_INTERSECTION_MAX_CORRECTIONS_PER_CLUSTER` | C 组默认 `1` | C 组同一参考轨迹局部簇最多纠正多少次。 |
-| `LOCAL_INTERSECTION_CLOUD_CONFIDENCE_THRESHOLD` | `0.5` | 云端返回 `is_intersection_challenge=true` 且 `confidence` 不低于该阈值时，才计为事件。 |
+| `LOCAL_INTERSECTION_CLOUD_CONFIDENCE_THRESHOLD` | `0.5` | 云端返回 `is_decision_difficulty=true` 且 `confidence` 不低于该阈值时，才计为事件。 |
 | `LOCAL_INTERSECTION_JUDGE_HISTORY_SIZE` | `4` | 发给云端路口 judge 的近期动作历史长度。路口判定只需要短历史，过长历史会增加 token 和延迟。 |
+| `LOCAL_INTERSECTION_SAVE_INPUTS` | B 组脚本默认 `1` | 保存每个送云端前的候选截图、深度图、prompt、request。 |
+| `LOCAL_INTERSECTION_SAVE_POSITIVE_INPUTS` | B 组脚本默认 `1` | 对云端确认的阳性样本，再单独归档一份截图、response 和 `decision_difficulty.json`。 |
+| `LOCAL_INTERSECTION_SAVE_POSITIVE_VIDEOS` | B 组脚本默认 `1` | 对云端确认的阳性样本，把对应 episode 视频再单独复制到阳性视频目录。 |
+| `LOCAL_EVAL_GENERATE_VIDEO` | B 组脚本默认 `1` | 开启普通评测视频导出；阳性视频归档依赖它。 |
 
-B/C 组会保留普通本地评测的所有输出，并额外保存路口事件文件：
+B/C 组会保留普通本地评测的所有输出，并额外保存决策难点事件文件：
 
 ```text
 DATA/output/AirVLN-seq2seq-intersection-detect/eval/intersection_events/{time}/
 DATA/output/AirVLN-seq2seq-intersection-correct/eval/intersection_events/{time}/
 ```
 
-其中 `events_ckpt_{ckpt}_{split}.json` 是云端确认后的逐事件明细，包含 episode、step、当前位置、最近参考点、参考转向锚点、模型动作、参考动作、实际执行动作、是否纠正和云端原始回复；`cloud_checks_ckpt_{ckpt}_{split}.json` 会保存所有经过云端检查的候选点，包括云端判定为 false 的样本；`summary_ckpt_{ckpt}_{split}.json` 是汇总统计。聚合指标文件 `eval/results/{time}/stats_ckpt_{ckpt}_{split}.json` 里也会新增 `intersection_` 前缀的统计项，例如事件数、云端检查次数、同簇候选抑制次数、偏离过大抑制次数、云端检查上限抑制次数、云端缓存命中次数、云端阳性率、发生事件的 episode 比例、平均每条 episode 的事件数和纠正次数。
+其中 `events_ckpt_{ckpt}_{split}.json` 是云端确认后的逐事件明细，包含 episode、step、当前位置、最近参考点、参考转向锚点、模型动作、参考动作、实际执行动作、是否纠正、云端原始回复和 `difficulty_type`；`cloud_checks_ckpt_{ckpt}_{split}.json` 会保存所有经过云端检查的候选点，包括云端判定为 false 的样本；`summary_ckpt_{ckpt}_{split}.json` 是汇总统计。聚合指标文件 `eval/results/{time}/stats_ckpt_{ckpt}_{split}.json` 里也会新增 `intersection_` 前缀的统计项，例如事件数、云端检查次数、同簇候选抑制次数、偏离过大抑制次数、云端检查上限抑制次数、云端缓存命中次数、云端阳性率、发生事件的 episode 比例、平均每条 episode 的事件数和纠正次数。
 
 每次本地评测还会写入运行快照：
 
@@ -882,7 +886,7 @@ DATA/output/{name}/eval/run_manifests/{time}/manifest_ckpt_{ckpt}_{split}.json
 
 这个文件会记录运行状态、checkpoint、split、评测参数、当前 AirVLN git commit、工作区是否有未提交改动、最终结果文件路径和耗时。正式实验复盘时建议同时保存 `run_manifests/`、`results/`、`intermediate_results/`、`intermediate_results_every/`，B/C 组还要保存 `intersection_events/`。
 
-实验解释时建议至少跑三组同 checkpoint、同 split、同 `EVAL_NUM`、同 `maxAction` 的结果：普通本地评测作为 A 组，`eval_intersection_detect.sh` 作为 B 组，`eval_intersection_correct.sh` 作为 C 组。A 与 C 的成功率差值可以近似衡量“云端视觉确认的十字路口式单步错误”被排除后的收益；B 的事件率可以衡量这种失败原因在本地模型失败中是否常见。
+实验解释时建议至少跑三组同 checkpoint、同 split、同 `EVAL_NUM`、同 `maxAction` 的结果：普通本地评测作为 A 组，`eval_intersection_detect.sh` 作为 B 组，`eval_intersection_correct.sh` 作为 C 组。A 与 C 的成功率差值可以近似衡量“云端视觉确认的决策难点单步错误”被排除后的收益；B 的事件率可以衡量这种失败原因在本地模型失败中是否常见。
 
 
 #### A/B/C 实验级运行能力
@@ -934,7 +938,7 @@ LOCAL_EVAL_GPU_DEVICE=0 \
 bash ./AirVLN/scripts/eval_intersection_detect.sh
 ```
 
-B/C 云端视觉输入保存用于复核云端判定质量。开启后，每个经过云端检查的候选点会保存 prompt、RGB、深度图、去 base64 的 request 和 response：
+B/C 云端视觉输入保存用于复核云端判定质量。开启后，每个送云端前的候选点会保存 prompt、RGB、深度图、去 base64 的 request 和 response：
 
 ```bash
 LOCAL_INTERSECTION_SAVE_INPUTS=1 \
@@ -944,8 +948,26 @@ bash ./AirVLN/scripts/eval_intersection_detect.sh
 保存路径：
 
 ```text
-DATA/output/{name}/eval/intersection_inputs/{time}/{episode_id}/step_XXXX/
+DATA/output/{name}/eval/decision_candidates/{time}/{episode_id}/step_XXXX/
 ```
+
+如果同时开启：
+
+```bash
+LOCAL_INTERSECTION_SAVE_POSITIVE_INPUTS=1 \
+LOCAL_INTERSECTION_SAVE_POSITIVE_VIDEOS=1 \
+LOCAL_EVAL_GENERATE_VIDEO=1 \
+bash ./AirVLN/scripts/eval_intersection_detect.sh
+```
+
+那么云端确认的阳性样本还会额外保存到：
+
+```text
+DATA/output/{name}/eval/decision_positive_inputs/{time}/{episode_id}/step_XXXX/
+DATA/output/{name}/eval/decision_positive_videos/{time}/
+```
+
+`decision_positive_inputs/` 会包含 `rgb.jpg`、`depth.png`、`prompt.txt`、`request.json`、`response.json` 和 `decision_difficulty.json`；后者会记录 `difficulty_type`、置信度和云端理由。`decision_positive_videos/` 会保留对应 episode 的视频，便于人工回看“命中点前后到底发生了什么”。
 
 当前 B/C 默认还会先经过一层本地深度门控，再决定是否把候选点送给云端视觉 judge。这样可以过滤掉大量“直道、贴墙、楼顶通道、没有侧向开口”的误触发点。常用参数：
 

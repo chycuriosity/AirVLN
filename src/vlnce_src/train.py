@@ -1529,7 +1529,7 @@ def _eval_checkpoint(
 
                 if args.EVAL_GENERATE_VIDEO:
                     EVAL_GENERATE_VIDEO_DIR = Path(args.project_prefix) / 'DATA/output/{}/eval/videos/{}'.format(args.name, args.make_dir_time)
-                    generate_video(
+                    video_path = generate_video(
                         video_option=["disk"],
                         video_dir=str(EVAL_GENERATE_VIDEO_DIR),
                         images=rgb_frames[t],
@@ -1541,6 +1541,12 @@ def _eval_checkpoint(
                         },
                         tb_writer=writer,
                     )
+                    positive_video_path = intersection_monitor.preserve_positive_video(
+                        train_env.batch[t]['episode_id'],
+                        video_path,
+                    )
+                    if positive_video_path:
+                        infos[t]["decision_difficulty_positive_video"] = positive_video_path
 
                 logger.info((
                     'result-{} \t' +

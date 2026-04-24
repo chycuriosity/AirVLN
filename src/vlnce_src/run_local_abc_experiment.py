@@ -93,6 +93,8 @@ def build_env(spec, group, episode_list_path=None):
         "LOCAL_EVAL_GPU_DEVICE": str(spec.get("gpu_device", 0)),
         "LOCAL_SIMULATOR_TOOL_PORT": str(ports.get(group, ports.get("default", 30000))),
     })
+    if bool_value(spec.get("generate_video"), False):
+        env["LOCAL_EVAL_GENERATE_VIDEO"] = "1"
 
     cloud_config = spec.get("cloud_config")
     if cloud_config:
@@ -123,6 +125,10 @@ def build_env(spec, group, episode_list_path=None):
         })
         if bool_value(intersection.get("save_inputs")):
             env["LOCAL_INTERSECTION_SAVE_INPUTS"] = "1"
+        if bool_value(intersection.get("save_positive_inputs")):
+            env["LOCAL_INTERSECTION_SAVE_POSITIVE_INPUTS"] = "1"
+        if bool_value(intersection.get("save_positive_videos")):
+            env["LOCAL_INTERSECTION_SAVE_POSITIVE_VIDEOS"] = "1"
         if episode_list_path:
             env["LOCAL_EVAL_EPISODE_LIST_PATH"] = str(episode_list_path)
 

@@ -207,7 +207,7 @@ def generate_video(
         None
     """
     if len(images) < 1:
-        return
+        return None
 
     metric_strs = []
     for k, v in metrics.items():
@@ -216,13 +216,15 @@ def generate_video(
     video_name = f"episode={episode_id}-ckpt={checkpoint_idx}-" + "-".join(
         metric_strs
     )
+    disk_path = None
     if "disk" in video_option:
         assert video_dir is not None
-        images_to_video(images, video_dir, video_name)
+        disk_path = images_to_video(images, video_dir, video_name)
     if "tensorboard" in video_option:
         tb_writer.add_video_from_np_images(
             f"episode{episode_id}", checkpoint_idx, images, fps=fps
         )
+    return disk_path if "disk" in video_option else None
 
 
 def images_to_video(
@@ -257,8 +259,9 @@ def images_to_video(
         quality=quality,
         **kwargs,
     )
-    logger.info(f"Video created: {os.path.join(output_dir, video_name)}")
+    output_path = os.path.join(output_dir, video_name)
+    logger.info(f"Video created: {output_path}")
     for im in images:
         writer.append_data(im)
     writer.close()
-
+    return output_path

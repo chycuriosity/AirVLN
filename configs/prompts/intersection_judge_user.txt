@@ -9,21 +9,30 @@ Recent executed action history:
 {depth_summary_block}
 {branch_visibility_block}
 
+Local candidate tags suggested by the local trigger:
+{candidate_tags_block}
+
 Image 1 is the UAV RGB observation.
 If present, Image 2 is a colorized depth map where red/yellow means closer obstacles and blue means farther space.
 
 Question:
-Does the current visual scene contain an intersection-like branching decision point that should be counted as the target failure mode for this experiment?
+Does the current visual scene contain a decision difficulty that should be counted as the target failure mode for this experiment?
 
 Use this definition:
-- Count true when the image shows a road/path/building-corridor style split, crossroad, fork, T-junction, street-corner junction, left/right branch, bridge entry/exit choice, or visually plausible multiple route choices with clear junction geometry.
-- Count true only if a wrong branch choice would likely be costly for reaching the described destination.
-- Count false for ordinary turning, open-space drifting, obstacle avoidance without route branching, altitude adjustment, waterfront openness, plaza-like widening, curved sidewalks, or cases where there is no visible branching ambiguity.
-- Do not decide whether the model action is correct; only judge whether the visual scene is the target intersection-like difficult decision point.
+- Count true only when the image shows a costly branch-choice or landmark-alignment difficulty.
+- Valid true cases include:
+  1. junction_like: road/path/building-corridor split, crossroad, fork, T-junction, bridge entry/exit choice, street-corner branch.
+  2. occluded_landmark: the instruction depends on a landmark or waypoint cue, but it is only partially visible, distant, or blocked.
+  3. ambiguous_landmark: multiple similar landmarks or route options are visible and the current frame does not clearly disambiguate the instruction target.
+  4. limited_visibility_turn: the correct turn depends on structure hidden around a corner, behind a facade, or outside the current field of view.
+  5. memory_required: the current frame alone is insufficient and the decision depends on short-term visual history.
+- Count false for ordinary turning, open-space drifting, obstacle avoidance without route ambiguity, altitude adjustment, rooftop openness, curved sidewalks, or scenes with no clear branch or semantic ambiguity.
+- Do not decide whether the model action is correct; only judge whether this scene is a meaningful decision difficulty.
 
 Return exactly one JSON object:
 {{
-  "is_intersection_challenge": true,
+  "is_decision_difficulty": true,
+  "difficulty_type": "junction_like",
   "confidence": 0.0,
   "visual_cues": ["short cue"],
   "reason": "short reason"

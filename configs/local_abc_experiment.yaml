@@ -22,6 +22,9 @@ max_action: 500
 # 当前评测代码默认 batch_size=1 最稳定。
 batch_size: 1
 
+# 是否生成评测视频。B 组如果要保留阳性 episode 视频，需要开启。
+generate_video: false
+
 # B/C 组云端视觉 judge 配置。
 cloud_config: configs/cloud_eval.yaml
 
@@ -90,6 +93,10 @@ intersection:
   # 路口判定只需要短历史，过长历史会增加 token 和延迟。
   judge_history_size: 4
   save_inputs: false
+  # 阳性候选的截图单独归档，便于人工回看。
+  save_positive_inputs: false
+  # 阳性候选所在 episode 的视频单独归档；开启时建议同时开启 generate_video。
+  save_positive_videos: false
 
 # C 组纠错节流参数，避免过度注入参考轨迹。
 correction:

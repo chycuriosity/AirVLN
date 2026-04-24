@@ -1,4 +1,5 @@
 import json
+import shutil
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -25,6 +26,37 @@ TURN_ACTIONS = {
     AirsimActions.TURN_RIGHT,
     AirsimActions.MOVE_LEFT,
     AirsimActions.MOVE_RIGHT,
+}
+
+LANDMARK_CUE_WORDS = {
+    "building",
+    "bridge",
+    "tower",
+    "statue",
+    "plaza",
+    "square",
+    "church",
+    "corner",
+    "gate",
+    "entrance",
+    "exit",
+    "road",
+    "street",
+    "alley",
+    "river",
+    "lake",
+    "park",
+    "tree",
+    "fountain",
+    "stairs",
+    "staircase",
+    "wall",
+    "door",
+    "doorway",
+    "roof",
+    "house",
+    "courtyard",
+    "landmark",
 }
 
 
@@ -68,6 +100,11 @@ def is_branch_mismatch(model_action, reference_action):
     if model_branch not in branch_set or reference_branch not in branch_set:
         return False
     return model_branch != reference_branch
+
+
+def instruction_landmark_cues(text):
+    text = str(text or "").lower()
+    return sorted(word for word in LANDMARK_CUE_WORDS if word in text)
 
 
 def pose_position(pose_like):
@@ -159,11 +196,11 @@ def depth_branch_openness(depth):
 DEFAULT_INTERSECTION_SYSTEM_PROMPT = (
     "You are a visual auditor for a UAV vision-and-language navigation benchmark. "
     "Your job is not to navigate. Decide whether the current UAV RGB/depth observation "
-    "shows a high-stakes street-level intersection, fork, crossroad, street-corner junction, or branching decision point where "
-    "choosing the wrong left/right/forward branch would likely cause a large navigation error. "
-    "Prefer true only for explicit road or corridor junction geometry with distinct branch options separated by corners, road edges, building gaps, bridge entries, crosswalk-marked street corners, or T/cross layouts. "
-    "Prefer false for gentle path curvature, sidewalk widening, waterfront open space, plazas, roof edges, obstacle bypassing, or loosely open areas without a clear junction structure. "
-    "Use the visual input, depth information, instruction context, and recent action context. "
+    "shows a high-risk decision difficulty where the local model could easily make a costly mistake. "
+    "The target failure modes include: explicit junction-like branching, partially occluded target landmarks, ambiguous landmark matching, and limited-visibility turns where the correct branch or landmark cue is hard to confirm from the current viewpoint. "
+    "Prefer true only when the scene is genuinely difficult for route choice or landmark alignment under the instruction. "
+    "Prefer false for ordinary turning, open drifting, obstacle bypassing, altitude-only adjustment, gentle curvature, or scenes with no clear branch or semantic ambiguity. "
+    "Use the visual input as primary evidence, and use depth information, instruction context, and recent action context as supporting evidence. "
     "Return only valid JSON."
 )
 
@@ -182,18 +219,27 @@ Recent executed action history:
 Image 1 is the UAV RGB observation.
 If present, Image 2 is a colorized depth map where red/yellow means closer obstacles and blue means farther space.
 
+Local candidate tags suggested by the local trigger:
+{candidate_tags_block}
+
 Question:
-Does the current visual scene contain an intersection-like branching decision point that should be counted as the target failure mode for this experiment?
+Does the current visual scene contain a decision difficulty that should be counted as the target failure mode for this experiment?
 
 Use this definition:
-- Count true when the image shows a road/path/building-corridor style split, crossroad, fork, T-junction, street-corner junction, bridge entry/exit choice, left/right branch, or visually plausible multiple route choices with clear junction geometry.
-- Count true only if a wrong branch choice would likely be costly for reaching the described destination.
-- Count false for ordinary turning, open-space drifting, obstacle avoidance without route branching, altitude adjustment, waterfront openness, plaza-like widening, curved sidewalks, or cases where there is no visible branching ambiguity.
-- Do not decide whether the model action is correct; only judge whether the visual scene is the target intersection-like difficult decision point.
+- Count true when the image shows a costly branch-choice or landmark-alignment difficulty.
+- Valid true cases include:
+  1. junction_like: road/path/building-corridor split, crossroad, fork, T-junction, bridge entry/exit choice, street-corner branch.
+  2. occluded_landmark: the instruction depends on a landmark or waypoint cue, but it is only partially visible, distant, or blocked.
+  3. ambiguous_landmark: multiple similar landmarks or route options are visible and the current frame does not clearly disambiguate the instruction target.
+  4. limited_visibility_turn: the correct turn depends on structure hidden around a corner, behind a facade, or outside the current field of view.
+  5. memory_required: the current frame alone is insufficient and the decision depends on short-term visual history.
+- Count false for ordinary turning, open-space drifting, obstacle avoidance without route ambiguity, altitude adjustment, rooftop openness, curved sidewalks, or scenes with no clear branch or semantic ambiguity.
+- Do not decide whether the model action is correct; only judge whether this scene is a meaningful decision difficulty.
 
 Return exactly one JSON object:
 {{
-  "is_intersection_challenge": true,
+  "is_decision_difficulty": true,
+  "difficulty_type": "junction_like",
   "confidence": 0.0,
   "visual_cues": ["short cue"],
   "reason": "short reason"
@@ -231,8 +277,8 @@ class CloudIntersectionJudge:
                     "attempts": int(cloud_meta.get("attempts", 1) or 1),
                 }
 
-    def judge(self, observation, episode, model_action, step, history, save_dir=None):
-        messages = self._build_messages(observation, episode, model_action, step, history)
+    def judge(self, observation, episode, model_action, step, history, candidate_tags=None, save_dir=None):
+        messages = self._build_messages(observation, episode, model_action, step, history, candidate_tags)
         prompt_hash = self.client._hash_messages(messages)
         saved_inputs = self._save_inputs(messages, observation, save_dir) if save_dir is not None else {}
         started_at = time.time()
@@ -241,9 +287,9 @@ class CloudIntersectionJudge:
 
         cached = self.response_cache.get(prompt_hash)
         if cached is not None:
-            payload = cached["parsed"]
+            payload = self._normalize_payload(cached["parsed"])
             confidence = float(payload.get("confidence", 0.0) or 0.0)
-            is_positive = bool(payload.get("is_intersection_challenge")) and confidence >= self.confidence_threshold
+            is_positive = bool(payload.get("is_decision_difficulty")) and confidence >= self.confidence_threshold
             self._save_response(saved_inputs, cached.get("raw_response", ""), payload, None)
             return is_positive, {
                 "raw_response": cached.get("raw_response", ""),
@@ -270,9 +316,10 @@ class CloudIntersectionJudge:
                 raw_response = completion.choices[0].message.content or ""
                 payload = self._extract_json(raw_response)
                 if payload is not None:
+                    payload = self._normalize_payload(payload)
                     self._save_response(saved_inputs, raw_response, payload, None)
                     confidence = float(payload.get("confidence", 0.0) or 0.0)
-                    is_positive = bool(payload.get("is_intersection_challenge")) and confidence >= self.confidence_threshold
+                    is_positive = bool(payload.get("is_decision_difficulty")) and confidence >= self.confidence_threshold
                     self.response_cache[prompt_hash] = {
                         "raw_response": raw_response,
                         "parsed": payload,
@@ -324,8 +371,8 @@ class CloudIntersectionJudge:
             "user_prompt_path": self._prompt_path(getattr(self.args, "intersection_cloud_prompt_user_path", None)),
         }
 
-    def _build_messages(self, observation, episode, model_action, step, history):
-        context = self._prompt_context(observation, episode, model_action, step, history)
+    def _build_messages(self, observation, episode, model_action, step, history, candidate_tags):
+        context = self._prompt_context(observation, episode, model_action, step, history, candidate_tags)
         content = [{"type": "text", "text": self.user_prompt.format_map(_SafeFormatDict(context)).strip()}]
         if not self.args.cloud_no_rgb and observation.get("rgb") is not None:
             content.append({
@@ -351,7 +398,7 @@ class CloudIntersectionJudge:
             {"role": "user", "content": content},
         ]
 
-    def _prompt_context(self, observation, episode, model_action, step, history):
+    def _prompt_context(self, observation, episode, model_action, step, history, candidate_tags):
         pose_block = ""
         depth_summary_block = ""
         branch_visibility_block = ""
@@ -377,6 +424,7 @@ class CloudIntersectionJudge:
             "pose_block": pose_block,
             "depth_summary_block": depth_summary_block,
             "branch_visibility_block": branch_visibility_block,
+            "candidate_tags_block": json.dumps(candidate_tags or [], ensure_ascii=True),
         }
 
     def _format_history(self, history):
@@ -407,6 +455,16 @@ class CloudIntersectionJudge:
 
     def _extract_json(self, text):
         return self.client._extract_json(text)
+
+    def _normalize_payload(self, payload):
+        payload = dict(payload or {})
+        if "is_decision_difficulty" not in payload:
+            payload["is_decision_difficulty"] = bool(payload.get("is_intersection_challenge"))
+        if "difficulty_type" not in payload or not payload.get("difficulty_type"):
+            payload["difficulty_type"] = "junction_like" if payload.get("is_decision_difficulty") else "none"
+        payload["difficulty_type"] = str(payload.get("difficulty_type") or "none")
+        payload["is_intersection_challenge"] = bool(payload.get("is_decision_difficulty"))
+        return payload
 
     def _save_inputs(self, messages, observation, save_dir):
         save_dir = Path(save_dir)
@@ -489,7 +547,17 @@ class IntersectionInterventionMonitor:
         self.max_corrections_per_episode = int(getattr(args, "intersection_max_corrections_per_episode", -1))
         self.max_corrections_per_cluster = int(getattr(args, "intersection_max_corrections_per_cluster", -1))
         self.save_inputs = bool(getattr(args, "intersection_save_inputs", False))
-        self.input_root = Path(args.project_prefix) / "DATA/output/{}/eval/intersection_inputs/{}".format(
+        self.save_positive_inputs = bool(getattr(args, "intersection_save_positive_inputs", False))
+        self.save_positive_videos = bool(getattr(args, "intersection_save_positive_videos", False))
+        self.input_root = Path(args.project_prefix) / "DATA/output/{}/eval/decision_candidates/{}".format(
+            args.name,
+            args.make_dir_time,
+        )
+        self.positive_input_root = Path(args.project_prefix) / "DATA/output/{}/eval/decision_positive_inputs/{}".format(
+            args.name,
+            args.make_dir_time,
+        )
+        self.positive_video_root = Path(args.project_prefix) / "DATA/output/{}/eval/decision_positive_videos/{}".format(
             args.name,
             args.make_dir_time,
         )
@@ -506,6 +574,9 @@ class IntersectionInterventionMonitor:
         self.corrections_by_episode_cluster = defaultdict(int)
         self.cloud_checks_by_episode = defaultdict(int)
         self.checked_candidate_clusters = set()
+        self.positive_episode_ids = set()
+        self.positive_input_dirs = defaultdict(list)
+        self.positive_video_paths = {}
         self.stats = {
             "mode": self.mode,
             "detector": self.detector,
@@ -539,6 +610,8 @@ class IntersectionInterventionMonitor:
             "cloud_latency_sec_total": 0.0,
             "cloud_latency_sec_max": 0.0,
             "input_snapshots_saved": 0,
+            "positive_input_snapshots_saved": 0,
+            "positive_videos_saved": 0,
         }
 
     def restore(self, events=None, cloud_checks=None):
@@ -550,6 +623,9 @@ class IntersectionInterventionMonitor:
         self.corrections_by_episode_cluster = defaultdict(int)
         self.cloud_checks_by_episode = defaultdict(int)
         self.checked_candidate_clusters = set()
+        self.positive_episode_ids = set()
+        self.positive_input_dirs = defaultdict(list)
+        self.positive_video_paths = {}
 
         self.stats.update({
             "candidate_events": len(self.cloud_checks) if self.cloud_checks else len(self.events),
@@ -571,6 +647,8 @@ class IntersectionInterventionMonitor:
             "cloud_latency_sec_total": 0.0,
             "cloud_latency_sec_max": 0.0,
             "input_snapshots_saved": 0,
+            "positive_input_snapshots_saved": 0,
+            "positive_videos_saved": 0,
         })
 
         if self.cloud_judge is not None:
@@ -595,6 +673,10 @@ class IntersectionInterventionMonitor:
                 self.stats["cloud_error_checks"] += 1
             if cloud_meta.get("saved_inputs"):
                 self.stats["input_snapshots_saved"] += 1
+            positive_inputs = cloud_meta.get("positive_inputs")
+            if positive_inputs:
+                self.stats["positive_input_snapshots_saved"] += 1
+                self.positive_input_dirs[episode_id].append(positive_inputs)
             if cloud_meta.get("cache_hit"):
                 self.stats["cloud_cache_hits"] += 1
             cluster_id = check.get("candidate_cluster_id")
@@ -602,6 +684,8 @@ class IntersectionInterventionMonitor:
                 cluster_id = check.get("cluster_id")
             if cluster_id is not None:
                 self.checked_candidate_clusters.add((str(check.get("episode_id")), int(cluster_id)))
+            if check.get("is_decision_difficulty") or check.get("is_intersection_challenge"):
+                self.positive_episode_ids.add(episode_id)
 
         if not self.cloud_checks:
             self.stats["wrong_decision_candidates"] = sum(
@@ -629,6 +713,8 @@ class IntersectionInterventionMonitor:
                 key = "corrections_suppressed_by_{}".format(reason)
                 if key in self.stats:
                     self.stats[key] += 1
+            if event.get("is_decision_difficulty") or event.get("is_intersection_challenge"):
+                self.positive_episode_ids.add(episode_id)
 
     def enabled(self):
         return self.mode in {"detect", "correct"}
@@ -710,6 +796,71 @@ class IntersectionInterventionMonitor:
         }
         return pass_gate, details
 
+    def _decision_difficulty_assessment(self, observation, episode, reference_action, near_turn):
+        landmark_cues = instruction_landmark_cues(episode["instruction"]["instruction_text"])
+        landmark_instruction = bool(landmark_cues)
+        if observation is None or observation.get("depth") is None:
+            return {
+                "pass_gate": bool(near_turn and landmark_instruction),
+                "candidate_tags": ["memory_required"] if near_turn and landmark_instruction else [],
+                "landmark_instruction": landmark_instruction,
+                "landmark_cues": landmark_cues,
+                "depth_available": False,
+            }
+
+        branch_visibility = depth_branch_openness(observation.get("depth"))
+        if branch_visibility is None:
+            return {
+                "pass_gate": bool(near_turn),
+                "candidate_tags": ["memory_required"] if near_turn else [],
+                "landmark_instruction": landmark_instruction,
+                "landmark_cues": landmark_cues,
+                "depth_available": False,
+            }
+
+        threshold = float(self.depth_open_threshold)
+        open_flags = {
+            "left": branch_visibility["left_mean"] >= threshold,
+            "front": branch_visibility["front_mean"] >= threshold,
+            "right": branch_visibility["right_mean"] >= threshold,
+        }
+        open_count = sum(1 for flag in open_flags.values() if flag)
+        target_branch = action_branch(reference_action)
+        target_branch_open = open_flags.get(target_branch, True)
+        forward_blocked = (
+            branch_visibility["front_mean"] < threshold * 0.85
+            or branch_visibility["front_min"] < threshold * 0.45
+        )
+        side_open = bool(open_flags["left"] or open_flags["right"])
+
+        candidate_tags = []
+        if open_count >= max(1, int(self.min_open_branches)) and target_branch_open:
+            candidate_tags.append("junction_like")
+        if landmark_instruction and forward_blocked:
+            candidate_tags.append("occluded_landmark")
+        if landmark_instruction and open_count >= 2:
+            candidate_tags.append("ambiguous_landmark")
+        if near_turn and (forward_blocked or (target_branch in {"left", "right"} and not target_branch_open)):
+            candidate_tags.append("limited_visibility_turn")
+        if near_turn and landmark_instruction and not side_open and forward_blocked:
+            candidate_tags.append("memory_required")
+
+        return {
+            "pass_gate": bool(candidate_tags),
+            "candidate_tags": sorted(set(candidate_tags)),
+            "landmark_instruction": landmark_instruction,
+            "landmark_cues": landmark_cues,
+            "open_flags": open_flags,
+            "open_count": int(open_count),
+            "target_branch": target_branch,
+            "target_branch_open": bool(target_branch_open),
+            "forward_blocked": bool(forward_blocked),
+            "depth_branch_visibility": branch_visibility,
+            "threshold": threshold,
+            "min_open_branches": int(self.min_open_branches),
+            "depth_available": True,
+        }
+
     def evaluate_step(self, episode, current_pose, model_action, step, observation=None, history=None):
         if not self.enabled():
             return int(model_action), None
@@ -736,16 +887,23 @@ class IntersectionInterventionMonitor:
             self.turn_window,
         )
         wrong_decision = self._is_wrong_decision(model_action, reference_action)
+        difficulty_assessment = self._decision_difficulty_assessment(
+            observation,
+            episode,
+            reference_action,
+            near_turn,
+        )
+        local_candidate_tags = difficulty_assessment.get("candidate_tags", [])
+        local_difficulty_candidate = bool(local_candidate_tags)
 
-        if not self._should_check_cloud(near_turn, wrong_decision):
+        if not (wrong_decision and (near_turn or local_difficulty_candidate)):
             return int(model_action), None
         if self.candidate_mode == "strict":
-            if not self._strict_candidate_ok(reference_actions, reference_index, turn_anchor_distance):
+            if near_turn and not self._strict_candidate_ok(reference_actions, reference_index, turn_anchor_distance):
                 return int(model_action), None
-        visibility_gate = None
+        visibility_gate = difficulty_assessment
         if self._should_apply_visibility_gate():
-            pass_gate, visibility_gate = self._visibility_gate(observation, reference_action)
-            if not pass_gate:
+            if not difficulty_assessment.get("pass_gate", False):
                 self.stats["candidates_suppressed_by_visibility"] += 1
                 return int(model_action), None
 
@@ -776,6 +934,7 @@ class IntersectionInterventionMonitor:
                 model_action=model_action,
                 step=step,
                 history=history or [],
+                candidate_tags=local_candidate_tags,
                 save_dir=self._input_save_dir(episode_id, step) if self.save_inputs else None,
             )
             if cloud_meta.get("saved_inputs"):
@@ -809,7 +968,9 @@ class IntersectionInterventionMonitor:
                 "candidate_cluster_id": int(candidate_cluster_id),
                 "wrong_decision": bool(wrong_decision),
                 "candidate_mode": self.candidate_mode,
+                "local_candidate_tags": local_candidate_tags,
                 "visibility_gate": visibility_gate,
+                "is_decision_difficulty": bool(is_intersection),
                 "is_intersection_challenge": bool(is_intersection),
                 "cloud": cloud_meta,
             }
@@ -817,6 +978,11 @@ class IntersectionInterventionMonitor:
             if not is_intersection:
                 return int(model_action), None
             self.stats["cloud_positive_events"] += 1
+            positive_dir = self._archive_positive_inputs(episode_id, step, cloud_meta)
+            if positive_dir is not None:
+                cloud_meta["positive_inputs"] = positive_dir
+                check["positive_input_dir"] = positive_dir
+                self.positive_episode_ids.add(episode_id)
         elif self.detector != "reference_proxy":
             raise ValueError("Unsupported intersection_detector: {}".format(self.detector))
 
@@ -856,6 +1022,7 @@ class IntersectionInterventionMonitor:
             "turn_anchor_index": int(turn_anchor_index) if turn_anchor_index is not None else None,
             "turn_anchor_distance": int(turn_anchor_distance) if turn_anchor_distance is not None else None,
             "candidate_mode": self.candidate_mode,
+            "local_candidate_tags": local_candidate_tags,
             "visibility_gate": visibility_gate,
             "wrong_policy": self.policy,
             "wrong_decision": bool(wrong_decision),
@@ -872,12 +1039,69 @@ class IntersectionInterventionMonitor:
         }
         if cloud_meta is not None:
             event["cloud"] = cloud_meta
+            event["difficulty_type"] = cloud_meta.get("parsed", {}).get("difficulty_type")
+            event["is_decision_difficulty"] = bool(cloud_meta.get("parsed", {}).get("is_decision_difficulty"))
+            event["is_intersection_challenge"] = event["is_decision_difficulty"]
+            if cloud_meta.get("positive_inputs"):
+                event["positive_input_dir"] = cloud_meta.get("positive_inputs")
         self.events.append(event)
         return executed_action, event
 
     def _input_save_dir(self, episode_id, step):
         safe_episode_id = str(episode_id).replace("/", "_")
         return self.input_root / safe_episode_id / "step_{:04d}".format(int(step))
+
+    def _positive_input_save_dir(self, episode_id, step):
+        safe_episode_id = str(episode_id).replace("/", "_")
+        return self.positive_input_root / safe_episode_id / "step_{:04d}".format(int(step))
+
+    def _archive_positive_inputs(self, episode_id, step, cloud_meta):
+        if not self.save_positive_inputs:
+            return None
+        saved_inputs = (cloud_meta or {}).get("saved_inputs") or {}
+        request_path = saved_inputs.get("request")
+        if not request_path:
+            return None
+        src_dir = Path(request_path).parent
+        dst_dir = self._positive_input_save_dir(episode_id, step)
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for child in src_dir.iterdir():
+            if child.is_file():
+                shutil.copy2(str(child), str(dst_dir / child.name))
+        verdict_path = dst_dir / "decision_difficulty.json"
+        verdict_path.write_text(
+            json.dumps(
+                {
+                    "episode_id": str(episode_id),
+                    "step": int(step),
+                    "difficulty_type": (cloud_meta.get("parsed") or {}).get("difficulty_type"),
+                    "parsed": cloud_meta.get("parsed"),
+                },
+                indent=2,
+                ensure_ascii=True,
+            ),
+            encoding="utf-8",
+        )
+        self.stats["positive_input_snapshots_saved"] += 1
+        positive_dir = str(dst_dir)
+        self.positive_input_dirs[str(episode_id)].append(positive_dir)
+        return positive_dir
+
+    def should_preserve_positive_video(self, episode_id):
+        return self.save_positive_videos and str(episode_id) in self.positive_episode_ids
+
+    def preserve_positive_video(self, episode_id, video_path):
+        if not self.should_preserve_positive_video(episode_id):
+            return None
+        src_path = Path(video_path)
+        if not src_path.exists():
+            return None
+        self.positive_video_root.mkdir(parents=True, exist_ok=True)
+        dst_path = self.positive_video_root / src_path.name
+        shutil.copy2(str(src_path), str(dst_path))
+        self.positive_video_paths[str(episode_id)] = str(dst_path)
+        self.stats["positive_videos_saved"] += 1
+        return str(dst_path)
 
     def _cluster_id(self, reference_index):
         width = max(1, int(self.turn_window) * 2 + 1)
